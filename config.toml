@@ -2,7 +2,7 @@
 name = "Reality Compiler"
 version = "0.1.0"
 author = "Thomas Vergne"
-main = "examples/structures.rl"
+main = "examples/main.rl"
 
 [features.aliases]
 std = "$REALITY_DIR/std"
