@@ -7,6 +7,7 @@ import GHC.IO qualified as IO
 import Language.Reality.Syntax.HLIR qualified as HLIR
 import Language.Reality.Syntax.MLIR qualified as MLIR
 import qualified Data.List as List
+import qualified Data.Set as Set
 
 isReturnExpr :: HLIR.TLIR "expression" -> Bool
 isReturnExpr (HLIR.MkExprReturn _) = True
@@ -20,6 +21,10 @@ mapAndUnzip3M f xs = do
 
 unitExpr :: HLIR.TLIR "expression"
 unitExpr = HLIR.MkExprVariable (HLIR.MkAnnotation "unit" (Identity (HLIR.MkTyId "unit"))) []
+
+variablesToDeclare :: IORef [(Text, [MLIR.Expression])]
+variablesToDeclare = IO.unsafePerformIO $ newIORef []
+{-# NOINLINE variablesToDeclare #-}
 
 -- | ANF CONVERTER
 -- | Convert a HLIR expression to ANF (MLIR).
@@ -46,6 +51,7 @@ convertToANF ::
     m [MLIR.Toplevel]
 convertToANF xs = do
     toplevels <- mapM convertToplevel xs
+
     pure ([MLIR.MkTopTypeAlias "never" (HLIR.MkTyId "void")] <> concat toplevels)
 
 -- | Convert a HLIR toplevel to a MLIR toplevel.
@@ -55,7 +61,7 @@ convertToplevel :: (MonadIO m) => HLIR.TLIR "toplevel" -> m [MLIR.Toplevel]
 convertToplevel (HLIR.MkTopExternLet ann) = do
     pure [MLIR.MkTopExternalVariable ann.name ann.typeValue]
 convertToplevel (HLIR.MkTopFunctionDeclaration ann params ret body) = do
-    (body', lets, _) <- convertExpression body
+    (body', lets, bindings) <- convertExpression body
 
     -- If the function is "main", we need to add the GC start and end calls.
     -- We also need to add the "argc" and "argv" parameters if they are not present.
@@ -74,11 +80,16 @@ convertToplevel (HLIR.MkTopFunctionDeclaration ann params ret body) = do
                 ]
             | otherwise = params
 
+    varsToDeclare <- readIORef variablesToDeclare
+
+    let varsUpdates = concat [
+            exprs <> [MLIR.MkExprUpdate (MLIR.MkExprVariable varName) (MLIR.MkExprVariable varName)] | (varName, exprs) <- varsToDeclare ]
+
     -- Building the final body with GC calls if needed.
     -- If the function is not "main", we just use the body with let bindings.
     let body''
-            | ann.name == "main" = gcStart : lets ++ [body']
-            | otherwise = lets ++ [body']
+            | ann.name == "main" = gcStart : varsUpdates ++ lets ++ bindings ++ [body']
+            | otherwise = lets ++ bindings ++ [body']
 
     pure [MLIR.MkTopFunction ann.name args ret body'']
 convertToplevel (HLIR.MkTopConstantDeclaration ann expr) = do
@@ -94,11 +105,16 @@ convertToplevel (HLIR.MkTopModuleDeclaration{}) =
     Err.compilerError "Modules should have been resolved before ANF conversion."
 convertToplevel (HLIR.MkTopImport _) =
     Err.compilerError "Imports should have been resolved before ANF conversion."
-convertToplevel (HLIR.MkTopStructureDeclaration name fields) = do
-    pure [MLIR.MkTopStructure name.name fields]
-convertToplevel (HLIR.MkTopTypeAlias{}) =
-    Err.compilerError
-        "Type aliases should have been resolved before ANF conversion."
+convertToplevel (HLIR.MkTopTypeAlias name aliasedType) = do
+    case aliasedType of
+        HLIR.MkTyRecord row -> do
+            let fields = getFields row
+            namedFields <- forM (Map.toList fields) $ \(name', fieldType) -> do
+                pure $ HLIR.MkStructField name' fieldType
+
+            pure [MLIR.MkTopStructure name.name namedFields]
+
+        ty -> pure [MLIR.MkTopTypeAlias name.name ty]
 convertToplevel (HLIR.MkTopPublic node) = do
     node' <- convertToplevel node
     pure $ MLIR.MkTopPublic <$> node'
@@ -180,6 +196,13 @@ convertToplevel (HLIR.MkTopEnumeration header constructors) = do
                 arguments
                 structType
                 bodyExpr
+convertToplevel (HLIR.MkTopLet binding value) = do
+    (value', lets, _) <- convertExpression value
+
+    modifyIORef' variablesToDeclare $ \vars ->
+        vars ++ [(binding.name, lets ++ [value'])]
+
+    pure [MLIR.MkTopGlobal binding.name binding.typeValue.runIdentity Nothing]
 
 isCFStatement :: HLIR.TLIR "expression" -> Bool
 isCFStatement (HLIR.MkExprReturn _) = True
@@ -268,6 +291,13 @@ local' action = do
     liftIO $ writeIORef variableRenamingMap oldMap
     pure result
 
+buildMap :: HLIR.TLIR "expression" -> (Map Text (HLIR.TLIR "expression", HLIR.Type), HLIR.TLIR "expression")
+buildMap (HLIR.MkExprLocated _ e) = buildMap e
+buildMap (HLIR.MkExprStructureCreation k e r t _) = do
+    let (r', rest) = buildMap r
+
+    (Map.insert k (e, t.runIdentity) r', rest)
+buildMap e = (Map.empty, e)
 
 -- | Convert a HLIR expression to a MLIR expression in ANF.
 -- | This function takes a HLIR expression, and returns a MLIR expression.
@@ -357,17 +387,39 @@ convertExpression (HLIR.MkExprStructureAccess struct field) = do
     (struct', l1, bs1) <- convertExpression struct
     let access = MLIR.MkExprStructureAccess struct' field
     pure (access, l1, bs1)
-convertExpression (HLIR.MkExprStructureCreation ann fields) = do
-    (fieldExprs, l2s, bs2s) <- mapAndUnzip3M convertExpression (Map.elems fields)
+convertExpression (HLIR.MkExprStructureCreation k e r t rt) = do
+    let (creation, rest) = buildMap (HLIR.MkExprStructureCreation k e r t rt)
 
-    let fieldNames = Map.keys fields
+    record <- HLIR.sanitizeRecord $ HLIR.MkTyRecord (HLIR.MkTyRowExtend k t.runIdentity rt.runIdentity)
 
-    newVariable <- freshSymbol
+    (fields, l1, bs1) <- unzip3 <$> forM (Map.toList creation) (\(field, (expr, ty)) -> do
+        (expr', l1, bs1) <- convertExpression expr
+        pure ((field, (expr', ty)), l1, bs1))
 
-    let structCreation = MLIR.MkExprStructureCreation ann (Map.fromList (zip fieldNames fieldExprs))
-        letBinding = MLIR.MkExprLet newVariable ann (Just structCreation)
+    (restE, l2, bs2) <- convertExpression rest
 
-    pure (MLIR.MkExprVariable newVariable, concat l2s ++ [letBinding], mconcat bs2s)
+    recName <- freshSymbol
+
+    -- let malloc = MLIR.MkExprApplication (MLIR.MkExprVariable "GC_MALLOC") [MLIR.MkExprSizeOf record]
+    let def = MLIR.MkExprLet recName record Nothing
+    let var = MLIR.MkExprVariable recName
+
+    let wholeRecTy = getFields record
+
+    let upds = [MLIR.MkExprUpdate (MLIR.MkExprStructureAccess var field) e' | (field, (e', _)) <- fields]
+
+    let restTy = Map.withoutKeys wholeRecTy (Set.fromList $ map fst fields)
+
+    let upds' = if isEmptyRowExpr rest
+            then []
+            else [ MLIR.MkExprUpdate
+                    (MLIR.MkExprStructureAccess var field)
+                    (MLIR.MkExprStructureAccess restE field)
+                 | (field, _) <- Map.toList restTy
+                 ]
+
+    pure (var, concat l1 ++ l2 ++ [def] ++ upds' ++ upds, concat bs1 ++ bs2)
+convertExpression HLIR.MkExprStructureEmpty = pure (MLIR.MkExprStructureCreation Map.empty, [], [])
 convertExpression (HLIR.MkExprDereference e _) = do
     (e', l1, bs1) <- convertExpression e
     pure (MLIR.MkExprDereference e', l1, bs1)
@@ -413,7 +465,7 @@ convertExpression (HLIR.MkExprUpdate (HLIR.MkExprDereference e target) value _) 
     -- it would create a temporary variable that would
     -- disallow updates on pointers.
     let deref = MLIR.MkExprDereference (MLIR.MkExprVariable newName)
-        update = MLIR.MkExprUpdate deref value'
+        update = MLIR.MkExprUpdate deref (MLIR.MkExprCast target.runIdentity value')
         letExpr = MLIR.MkExprLet newName (MLIR.MkTyPointer target.runIdentity) (Just e')
 
     pure (update, l1 ++ [letExpr] ++ l2, bs1 ++ bs2)
@@ -545,10 +597,10 @@ generateCondition x (HLIR.MkPatternLiteral l) = do
                 (MLIR.MkExprVariable fun)
                 [x, MLIR.MkExprLiteral l]
     pure ([], [cond])
-generateCondition x (HLIR.MkPatternStructure _ fields) = do
+generateCondition x (HLIR.MkPatternStructure fields) = do
     (fieldsLets, fieldsConds) <-
         mapAndUnzipM
-            (\(name, p) -> generateCondition (MLIR.MkExprStructureAccess x name) p)
+            (\(name, p) -> generateCondition (MLIR.MkExprStructureAccess (MLIR.MkExprDereference x) name) p)
             (Map.toList fields)
     pure (concat fieldsLets, concat fieldsConds)
 
@@ -571,3 +623,14 @@ freshPrefixed prefix = do
     modifyIORef' symbolCounter (+ 1)
     i <- readIORef symbolCounter
     pure $ prefix <> "_" <> Text.pack (show i)
+
+isEmptyRowExpr :: HLIR.TLIR "expression" -> Bool
+isEmptyRowExpr HLIR.MkExprStructureEmpty = True
+isEmptyRowExpr (HLIR.MkExprLocated _ e) = isEmptyRowExpr e
+isEmptyRowExpr _ = False
+
+getFields :: HLIR.Type -> Map Text HLIR.Type
+getFields (HLIR.MkTyRecord t) = getFields t
+getFields (HLIR.MkTyRowExtend field ty rest) = Map.insert field ty (getFields rest)
+getFields HLIR.MkTyRowEmpty = Map.empty
+getFields _ = error "Expected a record type"
