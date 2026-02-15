@@ -59,8 +59,8 @@ handle (Left (err, pos@(p1, _))) _ = liftIO $ do
         CompilerError msg ->
             printErrorFromString
                 Nothing
-                ( "BONZAI INTERNAL ERROR: " <> show msg
-                , Just "report the issue to Bonzai developers"
+                ( "Reality INTERNAL ERROR: " <> show msg
+                , Just "report the issue to Reality developers"
                 , pos
                 )
                 "Resolution"
@@ -219,10 +219,26 @@ handle (Left (err, pos@(p1, _))) _ = liftIO $ do
                 , pos
                 )
                 "Resolution"
+        RewriteRowError ty label' ->
+            printErrorFromString
+                Nothing
+                ( "Cannot rewrite row type " <> show (toText ty) <> " with label " <> show label'
+                , Nothing
+                , pos
+                )
+                "Resolution"
+        ExpectedRecord ty ->
+            printErrorFromString
+                Nothing
+                ( "Expected a record type, but got " <> show (toText ty)
+                , Nothing
+                , pos
+                )
+                "Resolution"
 
 type ImportStack = [FilePath]
 
-type Error = (BonzaiError, HLIR.Position)
+type Error = (RealityError, HLIR.Position)
 
 annotateErrorBundle :: ParseErrorBundle Text Void -> NonEmpty (SourcePos, Text)
 annotateErrorBundle bundle =
@@ -232,7 +248,7 @@ annotateErrorBundle bundle =
             (bundleErrors bundle)
             (bundlePosState bundle)
 
-data BonzaiError
+data RealityError
     = ParseError P.ParseError
     | CyclicModuleDependency FilePath ImportStack
     | ModuleNotFound FilePath
@@ -254,9 +270,11 @@ data BonzaiError
     | ReturnOutsideFunction
     | BreakOutsideLoop
     | RecursionLimitExceeded Integer
+    | RewriteRowError HLIR.Type Text
+    | ExpectedRecord HLIR.Type
     deriving (Eq, Generic)
 
-instance Show BonzaiError where
+instance Show RealityError where
     show (ParseError e) = showError e
     show (CyclicModuleDependency path []) = "Cyclic module dependency detected with " <> show (normalise path)
     show (CyclicModuleDependency path stack) =
@@ -269,7 +287,7 @@ instance Show BonzaiError where
             <> show (normalise path)
             <> " not found"
     show (VariableNotFound name) = "Variable " <> show name <> " not found"
-    show (CompilerError msg) = "BONZAI INTERNAL ERROR: " <> show msg
+    show (CompilerError msg) = "Reality INTERNAL ERROR: " <> show msg
     show (UnificationFail t1 t2) = "Expected " <> show (toText t1) <> ", but got " <> show (toText t2)
     show (InvalidArgumentQuantity n k) = "Invalid number of arguments, expected " <> show n <> ", received " <> show k
     show (EnvironmentVariableNotFound name) = "Environment variable " <> show name <> " not found"
@@ -317,26 +335,30 @@ instance Show BonzaiError where
     show BreakOutsideLoop = "Break or continue statement outside of a loop"
     show (RecursionLimitExceeded _) =
         "Recursion limit exceeded"
-
+    show (RewriteRowError ty label') =
+        "Cannot rewrite row type " <> show (toText ty) <> " with label " <> show label'
+    show (ExpectedRecord ty) =
+        "Expected a record type, but got " <> show (toText ty)
+    
 showError :: P.ParseError -> String
 showError = P.errorBundlePretty
 
 compilerError :: (HasCallStack) => Text -> a
 compilerError msg = do
-    let err = "BONZAI INTERNAL ERROR: " <> msg
+    let err = "Reality INTERNAL ERROR: " <> msg
 
     let cs = getCallStack callStack
         callstack = Text.unlines $ map (("    - " <>) . fromString . prettySrcLoc . snd) cs
         pCallstack =
             if null cs
                 then ""
-                else "\n  A bug occured in Bonzai compiler.\n  CallStack:\n" <> callstack
+                else "\n  A bug occured in Reality compiler.\n  CallStack:\n" <> callstack
 
     IO.unsafePerformIO $ do
         putStrLn . toString $ err <> pCallstack
         exitFailure
 
-throw :: (MonadError Error m, MonadIO m) => BonzaiError -> m a
+throw :: (MonadError Error m, MonadIO m) => RealityError -> m a
 throw e = do
     pos <- HLIR.peekPosition'
     throwError (e, pos)
