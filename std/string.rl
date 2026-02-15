@@ -1,7 +1,16 @@
 import std.internal.gc;
 
-extern fn ptr_add<A>(ptr: A, offset: int) -> A;
-extern fn fetch_ptr<A>(ptr: A, index: int) -> A;
+type string = *char;
+
+extern fn malloc_string(s: string) -> string;
+#[intrinsic] {
+    extern fn strcat(x: string, y: string) -> string;
+    extern fn puts(s: string) -> int;
+    extern fn strlen(s: string) -> int;
+}
+extern fn concat_strings(a: string, b: string) -> string;
+extern fn char_eq(a: char, b: char) -> bool;
+extern fn string_to_int(s: string) -> int;
 
 impl fn (x: string) length() -> int {
     strlen(x)
@@ -11,11 +20,7 @@ impl fn (x: string) equals(y: string) -> bool {
     string_eq(x, y)
 }
 
-struct String {
-    data: string,
-    length: int
-};
-
+type String = { data: string, length: int };
 
 impl fn (x: string) get_index(index: int) -> char {
     let ptr = ptr_add(x, index * sizeof(char));
@@ -41,7 +46,7 @@ mod String {
     fn init(data: string) -> String {
         let string_mem = malloc_string(data);
 
-        struct String {
+        {
             data: string_mem,
             length: strlen(string_mem)
         }
@@ -58,7 +63,7 @@ mod String {
 impl fn (x: String) add(y: String) -> String {
     let result = concat_strings(x.data, y.data);
 
-    struct String {
+    {
         data: result,
         length: strlen(result)
     }
@@ -78,6 +83,10 @@ impl fn (x: int) show_prec(_: int) -> String {
     String.init(int_to_string(x))
 }
 
+impl fn (x: float) show_prec(i: int) -> String {
+    String.init(float_to_string(x))
+}
+
 impl fn (x: int) show_prec(_: int) -> String {
     String.init(number_to_string(x))
 }
@@ -95,7 +104,7 @@ fn show<A>(x: A) -> String {
 }
 
 fn print<A>(x: A) -> int {
-    printf((show(x) + "\n").data)
+    puts(show(x).data)
 }
 
 impl fn (x: String) equals(y: String) -> bool {
@@ -108,6 +117,16 @@ impl fn (x: char) equals(y: char) -> bool {
 
 extern fn int_to_char(x: int) -> char;
 extern fn char_to_int(c: char) -> int;
+extern fn string_to_float(str: string) -> float;
+extern fn string_to_int(str: string) -> int;
+
+impl fn (x: String) into_float() -> float {
+    string_to_float(x.data)
+}
+
+impl fn (x: String) into_int() -> int {
+    string_to_int(x.data)
+}
 
 impl fn (x: int) to_char() -> char {
     int_to_char(x)
@@ -121,92 +140,6 @@ impl fn (x: String) to_int() -> int {
     string_to_int(x.data)
 }
 
-property into_int<A>(x: A) -> int;
-property into_float<A>(x: A) -> float;
-
-impl fn (x: int) into_int() -> int {
-    x
-}
-
-impl fn (x: float) into_float() -> float {
-    x
-}
-
-extern fn int_to_float(x: int) -> float;
-extern fn float_to_int(x: float) -> int;
-
-extern fn string_to_float(str: string) -> float;
-extern fn string_to_int(str: string) -> int;
-
-
-impl fn (x: int) into_float() -> float {
-    int_to_float(x)
-}
-
-impl fn (x: float) into_int() -> int {
-    float_to_int(x)
-}
-
-impl fn (x: String) into_float() -> float {
-    string_to_float(x.data)
-}
-
-impl fn (x: String) into_int() -> int {
-    string_to_int(x.data)
-}
-
-fn float<A>(x: A) -> float {
-    return x.into_float();
-}
-
-fn int<A>(x: A) -> int {
-    return x.into_int();
-}
-
-extern fn add_float_(a: float, b: float) -> float;
-extern fn sub_float_(a: float, b: float) -> float;
-extern fn mul_float_(a: float, b: float) -> float;
-extern fn div_float_(a: float, b: float) -> float;
-extern fn equals_float_(a: float, b: float) -> bool;
-extern fn greater_float_(a: float, b: float) -> bool;
-extern fn less_float_(a: float, b: float) -> bool;
-extern fn mod_float_(a: float, b: float) -> float;
-extern fn float_to_string(f: float) -> string;
-
-impl fn (x: float) add(y: float) -> float {
-    add_float_(x, y)
-}
-impl fn (x: float) sub(y: float) -> float {
-    sub_float_(x, y)
-}
-
-impl fn (x: float) mul(y: float) -> float {
-    mul_float_(x, y)
-}
-
-impl fn (x: float) div(y: float) -> float {
-    div_float_(x, y)
-}
-
-impl fn (x: float) equals(y: float) -> bool {
-    equals_float_(x, y)
-}
-
-impl fn (x: float) greater(y: float) -> bool {
-    greater_float_(x, y)
-}
-
-impl fn (x: float) lesser(y: float) -> bool {
-    less_float_(x, y)
-}
-
-impl fn (x: float) show_prec(i: int) -> String {
-    String.init(float_to_string(x))
-}
-
-impl fn (x: float) negate() -> float {
-    0.0.sub(x)
-}
 
 mod GC {
     fn red(message: String) -> String {
@@ -228,6 +161,20 @@ impl fn (x: String) repeat(n: int) -> String {
 
     while i < n {
         result = result + x;
+        i = i + 1;
+    };
+
+    result
+}
+
+impl fn (x: String) slice(start: int, end: int) -> String {
+    // for instance "hello".slice(1,4) = "ell"
+    let length = if end > x.length { x.length } else { end };
+    let result = "";
+    let i = start;
+    while i < length {
+        let c = x[i];
+        result = result + String.init(GC.allocate(c));
         i = i + 1;
     };
 

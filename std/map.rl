@@ -29,7 +29,7 @@ impl fn (m: Map<K, V>) get<K, V>(key: K) -> Option<V> {
 
     return None;
 }
- 
+
 impl fn (m: *Map<K, V>) set<K, V>(key: K, value: V) -> unit {
     let i = 0;
     while i < m->length {
@@ -101,7 +101,7 @@ impl fn (m: *Map<K, V>) set_with<K, V>(key: K, f: fn(K, V) -> V, default: V) -> 
 }
 
 impl fn (it: Map<K, V>) iter<K, V>() -> Iterator<Map<K, V>> {
-    struct Iterator<Map<K, V>> {
+    {
         container: it,
         index: GC.allocate(0)
     }

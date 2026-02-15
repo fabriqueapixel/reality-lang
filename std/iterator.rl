@@ -1,10 +1,10 @@
-struct Iterator<A> {
+type Iterator<A> = {
     container: A,
     index: *int
 }
 
 impl fn (it: List<A>) iter<A>() -> Iterator<List<A>> {
-    struct Iterator<List<A>> {
+    {
         container: it,
         index: GC.allocate(0)
     }
@@ -24,25 +24,25 @@ impl fn (it: Iterator<List<A>>) next<A>() -> Option<A> {
     }
 }
 
-struct Range {
+type Range = {
     start: int,
     end: int
 }
 
-struct RangeIterator {
+type RangeIterator = {
     range: Range,
     current: *int
 }
 
 impl fn (r: Range) iter() -> RangeIterator {
-    struct RangeIterator {
+    {
         range: r,
         current: GC.allocate(r.start)
     }
 }
 
 pub fn range(start: int, end: int) -> Range {
-    struct Range {
+    {
         start: start,
         end: end
     }

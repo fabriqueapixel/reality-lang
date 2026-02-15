@@ -3,11 +3,7 @@ import option;
 import std.internal.gc;
 import tuple;
 
-struct List<A> {
-    data: *A,
-    length: int,
-    capacity: int
-};
+type List<A> = { data: *A, length: int, capacity: int };
 
 type size = int;
 
@@ -19,15 +15,15 @@ impl fn (c: *A) get_index<A>(index: int) -> A {
 
 impl fn (c: List<A>) get_index<A>(index: int) -> A {
     if index >= c.length {
-        GC.panic("Index out of bounds in List.get_index, " 
-            + show_prec(index, 0) 
+        GC.panic("Index out of bounds in List.get_index, "
+            + show_prec(index, 0)
             + " (<index>) must be less than "
-            + show_prec(c.length, 0) 
+            + show_prec(c.length, 0)
             + " (<length>)"
         );
     };
 
-    c.data.get_index(index)
+    return c.data.get_index(index)
 }
 
 impl fn (x: String) get_index(index: int) -> char {
@@ -46,7 +42,7 @@ impl fn (c: List<A>) get_index_mut<A>(index: int) -> *A {
 
 mod List {
     fn init<A>() -> List<A> {
-        struct List<A> {
+        {
             data: GC.calloc<A>(10),
             length: 0,
             capacity: 10
@@ -67,7 +63,7 @@ mod List {
 
     impl fn (list: List<A>) pop_at<A>(index: int) -> A {
         if index < 0 || index >= list.length {
-            GC.panic("Index out of bounds in List.pop_at, " 
+            GC.panic("Index out of bounds in List.pop_at, "
                 + index.show()
                 + " (<index>) must be between 0 and "
                 + (list.length - 1).show()
@@ -77,7 +73,7 @@ mod List {
 
         let value = list[index];
         let i = index;
-        
+
         while i < list.length - 1 {
             let current_value = list[i + 1];
             *(list.data).get_index_mut(i) = current_value;
@@ -374,35 +370,6 @@ mod List {
     }
 }
 
-impl fn (x: String) slice(start: int, end: int) -> String {
-    // for instance "hello".slice(1,4) = "ell"
-    let length = if end > x.length { x.length } else { end };
-    let result = "";
-    let i = start;
-    while i < length {
-        let c = x[i];
-        result = result + String.init(GC.allocate(c));
-        i = i + 1;
-    };
-
-    result
-}
-
-impl fn (x: List<String>) join(separator: String) -> String {
-    if x.length == 0 {
-        return "";
-    };
-
-    let result = x[0];
-    let i = 1;
-    while i < x.length {
-        result = result + separator + x[i];
-        i = i + 1;
-    };
-
-    return result;
-}
-
 impl fn (x: char) show_prec(_: int) -> String {
     let data = GC.allocate(x);
 
@@ -424,4 +391,19 @@ mod String {
         };
         result
     }
+}
+
+impl fn (x: List<String>) join(separator: String) -> String {
+    if x.length == 0 {
+        return "";
+    };
+
+    let result = x[0];
+    let i = 1;
+    while i < x.length {
+        result = result + separator + x[i];
+        i = i + 1;
+    };
+
+    return result;
 }
