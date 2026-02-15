@@ -12,18 +12,27 @@ import Language.Reality.Frontend.Parser.Toplevel qualified as T
 import Language.Reality.Frontend.Typechecker.Checker qualified as TC
 import System.Directory
 import System.FilePath
+import System.Process
 
 import Options.Applicative qualified as App
 import qualified Data.Text as Text
+import System.Environment (getEnv)
 
-data Options = MkOptions 
-    { optInputFile :: FilePath
-    , optPathAliases :: [(Text, FilePath)]
-    , optHeaders :: [FilePath]
-    }
+data BuildOptions
+    = MkBuildRealityOptions
+        { optInputFile :: FilePath
+        , optPathAliases :: [(Text, FilePath)]
+        , optHeaders :: [FilePath]
+        }
+    | MkBuildClangOptions
+        { clangInputFile :: FilePath
+        , clangOutputFile :: FilePath
+        , clangLibraries :: [FilePath]
+        , clangFlags :: [String]
+        }
 
-options :: App.Parser Options
-options = MkOptions
+options :: App.Parser BuildOptions
+options = MkBuildRealityOptions
     <$> App.strArgument
         ( App.metavar "FILE"
        <> App.help "Reality source file to compile" )
@@ -44,17 +53,44 @@ options = MkOptions
             (alias, '=':path) -> Right (Text.pack alias, path)
             _ -> Left "Alias must be in the format ALIAS=PATH"
 
+clangOptions :: App.Parser BuildOptions
+clangOptions = MkBuildClangOptions
+    <$> App.strArgument
+        ( App.metavar "INPUT"
+       <> App.help "Input C file to compile" )
+    <*> App.strOption
+        ( App.long "output"
+       <> App.short 'o'
+       <> App.metavar "OUTPUT"
+       <> App.help "Output executable file name" 
+       <> App.value "output/program")
+    <*> App.many (App.strOption
+        ( App.long "library"
+       <> App.short 'l'
+       <> App.metavar "LIBRARY"
+       <> App.help "Additional library to link against" ))
+    <*> App.many (App.strOption
+        ( App.long "flag"
+       <> App.short 'f'
+       <> App.metavar "FLAG"
+       <> App.help "Additional flag to pass to the C compiler" ))
 main :: IO ()
-main = buildOutput =<< App.execParser opts
+main = do
+    buildOpts <- App.execParser (App.info p App.idm)
+    buildOutput buildOpts
   where
-    opts = App.info (App.helper <*> options)
+    p = App.hsubparser
+        ( App.command "c" cOpts )
+        <|> options 
+
+    cOpts = App.info (App.helper <*> clangOptions)
       ( App.fullDesc
-     <> App.progDesc "Compile a Reality source FILE to C"
+     <> App.progDesc "Compile a Reality output C file to an executable using C compiler"
      <> App.header "hello - a test for optparse-applicative" )
 
 
-buildOutput :: Options -> IO ()
-buildOutput (MkOptions inputFile pathAliases headers) = do
+buildOutput :: BuildOptions -> IO ()
+buildOutput (MkBuildRealityOptions inputFile pathAliases headers) = do
     let file = inputFile
         cwd  = takeDirectory file
 
@@ -88,13 +124,32 @@ buildOutput (MkOptions inputFile pathAliases headers) = do
             let defines = ["#define GC_THREADS"]
 
             handle pipelineResult $ \cstr -> do
-                let finalCstr = 
-                        unlines defines 
-                        <> unlines (map ("#include " <>) includes) 
+                let finalCstr =
+                        unlines defines
+                        <> unlines (map ("#include " <>) includes)
                         <> unlines headers'
-                        <> "\n\n" 
+                        <> "\n\n"
                         <> cstr
 
                 writeFileText (file -<.> "c") finalCstr
         Left err -> do
             parseError err file (Just fileContent)
+buildOutput (MkBuildClangOptions inputFile outputFile libraries flags) = do
+    realityDir <- getEnv "REALITY_DIR"
+    libgcDir <- getEnv "LIBGC"
+
+    let clangCmd = "clang"
+        args = 
+            [inputFile, "-o", outputFile] 
+            ++ libraries 
+            ++ [
+                realityDir <> "/libc/String.c", 
+                realityDir <> "/libc/Actor.c", 
+                libgcDir <> "/lib/libgc.a", 
+                "-I" <> libgcDir <> "/include/", 
+                "-w"
+            ]
+            ++ map ('-':) flags
+
+    ppBuild $ "Running clang with arguments: " <> unwords (map fromString args)
+    callProcess clangCmd args
