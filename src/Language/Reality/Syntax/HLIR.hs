@@ -72,9 +72,13 @@ data Expression f t
         , field :: Text
         }
     | MkExprStructureCreation
-        { annotation :: t
-        , fields :: Map Text (Expression f t)
+        { field :: Text
+        , value :: Expression f t
+        , record :: Expression f t
+        , fieldType :: f t
+        , recordType :: f t
         }
+    | MkExprStructureEmpty
     | MkExprDereference (Expression f t) (f t)
     | MkExprReference (Expression f t) (f t)
     | MkExprUpdate
@@ -100,7 +104,7 @@ data Expression f t
     | MkExprBreak
     | MkExprContinue
     | MkExprIs (Expression f t) (Pattern f t) (f t)
-    | MkExprLetPatternIn 
+    | MkExprLetPatternIn
         { patternBinding :: Pattern f t
         , value :: Expression f t
         , inExpr :: Expression f t
@@ -133,10 +137,6 @@ data Toplevel f t
         { span :: Position
         , node :: Toplevel f t
         }
-    | MkTopStructureDeclaration
-        { header :: Ann.Annotation [Text]
-        , fields :: [StructureMember t]
-        }
     | MkTopExternalFunction
         { name :: Ann.Annotation [Text]
         , parameters :: [Ann.Annotation t]
@@ -154,6 +154,10 @@ data Toplevel f t
         , returnType :: t
         , body :: Expression f t
         }
+    | MkTopLet
+        { optBinding :: Ann.Annotation (f t)
+        , value :: Expression f t
+        }
     | MkTopAnnotation [Expression f t] (Toplevel f t)
     | MkTopExternLet (Ann.Annotation t)
     | MkTopEnumeration
@@ -168,7 +172,7 @@ data Pattern f t
     | MkPatternLet (Ann.Annotation (f t))
     | MkPatternLiteral Lit.Literal
     | MkPatternWildcard
-    | MkPatternStructure t (Map Text (Pattern f t))
+    | MkPatternStructure (Map Text (Pattern f t))
     | MkPatternConstructor Text [Pattern f t] (f t) -- Constructor name and its associated patterns
     | MkPatternLocated
         { span :: Position
@@ -183,7 +187,7 @@ data StructureMember t
     deriving (Eq, Ord, Show, Generic)
 
 -- | BINARY EXPRESSION PATTERN
--- | A pattern synonym to represent binary expressions in Bonzai.
+-- | A pattern synonym to represent binary expressions in Reality.
 pattern MkExprBinary ::
     Text -> Expression Maybe t -> Expression Maybe t -> Expression Maybe t
 pattern MkExprBinary op a b =
@@ -215,12 +219,12 @@ pattern MkExprVarCall name args =
     MkExprApplication (MkExprVariable (MkAnnotation name Nothing) []) args Nothing
 
 -- |  STRING EXPRESSION PATTERN
--- | A pattern synonym to represent string expressions in Bonzai.
+-- | A pattern synonym to represent string expressions in Reality.
 pattern MkExprString :: Text -> Expression f t
 pattern MkExprString s = MkExprLiteral (MkLitString s)
 
 -- | TUPLE EXPRESSION PATTERN
--- | A pattern synonym to represent tuple expressions in Bonzai.
+-- | A pattern synonym to represent tuple expressions in Reality.
 pattern MkExprTuple ::
     Expression Maybe t -> Expression Maybe t -> Expression Maybe t
 pattern MkExprTuple a b =
@@ -304,9 +308,9 @@ instance (ToText (f t), ToText t) => ToText (Expression f t) where
     toText (MkExprLocated _ e) = toText e
     toText (MkExprStructureAccess struct field) =
         T.concat [toText struct, ".", field]
-    toText (MkExprStructureCreation ann fields) =
-        let fieldTexts = map (\(name, expr) -> name <> ": " <> toText expr) (Map.toList fields)
-         in T.concat ["{ ", T.intercalate ", " fieldTexts, " } :: ", toText ann]
+    toText MkExprStructureEmpty = "{}"
+    toText (MkExprStructureCreation field value record _ _) =
+        T.concat [toText record, " { ", field, " = ", toText value, " }"]
     toText (MkExprDereference e _) = T.concat ["*", toText e]
     toText (MkExprReference e _) = T.concat ["&", toText e]
     toText (MkExprUpdate update value _) =
@@ -353,9 +357,9 @@ instance (ToText (f t), ToText t) => ToText (Pattern f t) where
     toText (MkPatternLet ann) = "let " <> toText ann
     toText (MkPatternLiteral lit) = toText lit
     toText MkPatternWildcard = "_"
-    toText (MkPatternStructure t fields) =
+    toText (MkPatternStructure fields) =
         let fieldTexts = map (\(name, pat) -> name <> ": " <> toText pat) (Map.toList fields)
-         in T.concat ["{ ", T.intercalate ", " fieldTexts, " } :: ", toText t]
+         in T.concat ["{ ", T.intercalate ", " fieldTexts, " }"]
     toText (MkPatternConstructor name pats _) =
         T.concat [name, "(", T.intercalate ", " (map toText pats), ")"]
     toText (MkPatternLocated _ p) = toText p
@@ -400,18 +404,6 @@ instance (ToText (f t), ToText t) => ToText (Toplevel f t) where
             , " }"
             ]
     toText (MkTopLocated _ n) = toText n
-    toText (MkTopStructureDeclaration header fields) =
-        let fieldTexts = map toText fields
-         in T.concat
-                [ "struct "
-                , header.name
-                , "["
-                , T.intercalate ", " header.typeValue
-                , "]"
-                , " { "
-                , T.intercalate ", " fieldTexts
-                , " }"
-                ]
     toText (MkTopExternalFunction name params ret) =
         T.concat
             [ "extern fn "
@@ -475,7 +467,8 @@ instance (ToText (f t), ToText t) => ToText (Toplevel f t) where
                 , T.intercalate ", " constructorTexts
                 , " }"
                 ]
-
+    toText (MkTopLet binding value) =
+        T.concat ["let ", toText binding, " = ", toText value]
 
 instance ToText t => ToText (StructureMember t) where
     toText (MkStructField name ty) =
@@ -515,9 +508,9 @@ instance Traversable StructureMember where
     traverse f (MkStructField name ty) = MkStructField name <$> f ty
     traverse f (MkStructStruct name fields) = MkStructStruct name <$> traverse (traverse f) fields
     traverse f (MkStructUnion name fields) = MkStructUnion name <$> traverse (traverse f) fields
-    
+
 instance Applicative StructureMember where
-    pure = MkStructField "" 
+    pure = MkStructField ""
     (MkStructField _ fTy) <*> sm = fmap fTy sm
     (MkStructStruct name fFields) <*> sm = MkStructStruct name (map (<*> sm) fFields)
     (MkStructUnion name fFields) <*> sm = MkStructUnion name (map (<*> sm) fFields)

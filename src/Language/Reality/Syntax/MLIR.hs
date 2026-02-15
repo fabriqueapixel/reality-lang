@@ -28,7 +28,7 @@ data Expression
     | MkExprSingleIf Expression Expression
     | MkExprLet Text Ty.Type (Maybe Expression)
     | MkExprStructureAccess Expression Text
-    | MkExprStructureCreation Ty.Type (Map.Map Text Expression)
+    | MkExprStructureCreation (Map.Map Text (Expression, Ty.Type))
     | MkExprDereference Expression
     | MkExprReference Expression
     | MkExprUpdate Expression Expression
@@ -71,16 +71,15 @@ instance ToText Expression where
         T.concat ["let ", n, ": ", toText ty, " = ", toText val]
     toText (MkExprStructureAccess struct field) =
         T.concat [toText struct, ".", field]
-    toText (MkExprStructureCreation ty fields) =
+    toText (MkExprStructureCreation fields) =
         T.concat
             [ "{ "
             , T.intercalate
                 ", "
                 [ T.concat [field, ": ", toText expr]
-                | (field, expr) <- Map.toList fields
+                | (field, (expr, _)) <- Map.toList fields
                 ]
-            , " } : "
-            , toText ty
+            , " }"
             ]
     toText (MkExprDereference expr) =
         T.concat ["deref(", toText expr, ")"]
