@@ -9,6 +9,7 @@ import GHC.IO qualified as IO
 import Language.Reality.Syntax.MLIR qualified as MLIR
 import qualified Language.Reality.Syntax.HLIR as HLIR
 import qualified Text.Printf as Text
+import Language.Reality.Backend.Specialization.Resolver (getAllFields)
 
 typedefs :: IORef [Text]
 typedefs = IO.unsafePerformIO $ newIORef []
@@ -21,6 +22,10 @@ symbolCounter = IO.unsafePerformIO $ newIORef 0
 userDefinedTypes :: IORef (Set Text)
 userDefinedTypes = IO.unsafePerformIO $ newIORef Set.empty
 {-# NOINLINE userDefinedTypes #-}
+
+types :: IORef [(MLIR.Type, Text)]
+types = IO.unsafePerformIO $ newIORef []
+{-# NOINLINE types #-}
 
 getUserDefinedTypes :: [MLIR.Toplevel] -> Set Text
 getUserDefinedTypes (MLIR.MkTopStructure name _ : xs) =
@@ -36,12 +41,13 @@ codegenProgram toplevels = do
 
     writeIORef userDefinedTypes userTypes
     writeIORef typedefs []
+    writeIORef types []
 
     codeLines <- mapM codegenToplevel toplevels
 
-    types <- readIORef typedefs
+    typedefs' <- readIORef typedefs
 
-    pure (Text.unlines (types <> codeLines))
+    pure (Text.unlines (typedefs' <> codeLines))
 
 unsnoc :: [a] -> Maybe ([a], a)
 unsnoc [] = Nothing
@@ -62,19 +68,19 @@ codegenToplevel (MLIR.MkTopFunction name params ret body) = do
                 ( \(MLIR.MkAnnotation paramName ty) -> codegenType True False (Just (varify paramName)) [] ty
                 )
                 params
-                
+
     retType <- codegenType True False Nothing [] ret
     let funcHeader = Text.concat [retType, " ", varify name, "(", paramList, ") {"]
     funcBody <- mapM codegenExpression body
     let funcFooter = ["}"]
     let insertedReturn = case (unsnoc funcBody, unsnoc body) of
-            (Just (initLines, lastLine), Just (_, MLIR.MkExprReturn _)) -> 
+            (Just (initLines, lastLine), Just (_, MLIR.MkExprReturn _)) ->
                 map (<> ";") initLines <> [Text.concat ["    ", lastLine, ";"]]
             (Just (initLines, lastLine), Just (_, MLIR.MkExprVariable "")) ->
                 map (<> ";") initLines <> [Text.concat ["    ", lastLine, ";"]]
-            (Just (initLines, lastLine), Just (_, expr)) | containsSpecialVariable expr -> 
+            (Just (initLines, lastLine), Just (_, expr)) | containsSpecialVariable expr ->
                 map (<> ";") initLines <> [Text.concat ["    ", lastLine, ";"]]
-            (Just (initLines, lastLine), _) -> 
+            (Just (initLines, lastLine), _) ->
                 map (<> ";") initLines <> [Text.concat ["    return ", lastLine, ";"]]
             (Nothing, _) -> []
 
@@ -107,6 +113,7 @@ codegenToplevel (MLIR.MkTopExternalVariable name ty) = do
     varType <- codegenType True True (Just name) [] ty
     pure $ Text.concat ["extern ", varType, ";"]
 codegenToplevel (MLIR.MkTopTypeAlias name ty) = do
+    modifyIORef' userDefinedTypes (Set.insert (varify name))
     tyStr <- codegenType True False Nothing [] ty
     pure $ Text.concat ["typedef ", tyStr, " ", varify name, ";"]
 
@@ -145,16 +152,26 @@ containsSpecialVariable (MLIR.MkExprReference e) = containsSpecialVariable e
 containsSpecialVariable (MLIR.MkExprSizeOf _) = False
 containsSpecialVariable (MLIR.MkExprStructureAccess struct _) =
     containsSpecialVariable struct
-containsSpecialVariable (MLIR.MkExprStructureCreation _ fields) =
-    any containsSpecialVariable (Map.elems fields)  
+containsSpecialVariable (MLIR.MkExprStructureCreation fields) =
+    any (containsSpecialVariable . fst) (Map.elems fields)
 containsSpecialVariable (MLIR.MkExprUpdate e v) =
     containsSpecialVariable e || containsSpecialVariable v
 containsSpecialVariable (MLIR.MkExprSingleIf cond thenBr) =
-    containsSpecialVariable cond || containsSpecialVariable thenBr  
+    containsSpecialVariable cond || containsSpecialVariable thenBr
 containsSpecialVariable (MLIR.MkExprWhile cond body) =
     containsSpecialVariable cond || containsSpecialVariable body
 containsSpecialVariable (MLIR.MkExprReturn e) = containsSpecialVariable e
 containsSpecialVariable _ = False
+
+findType :: [(MLIR.Type, Text)] -> Map Text (MLIR.Expression, MLIR.Type) -> Maybe Text
+findType ((HLIR.MkTyRecord r, n) : xs) structMap = do
+    let (fields, _) = getAllFields r
+
+    if fields == Map.map snd structMap
+        then Just n
+        else findType xs structMap
+findType (_ : xs) structMap = findType xs structMap
+findType [] _ = Nothing
 
 -- | Convert a single MLIR expression to C code lines.
 -- | This function takes an expression, and returns a list of C code lines.
@@ -213,16 +230,21 @@ codegenExpression (MLIR.MkExprStructureAccess (MLIR.MkExprDereference e) f) = do
 codegenExpression (MLIR.MkExprStructureAccess e f) = do
     eStr <- codegenExpression e
     pure $ Text.concat [eStr, ".", varify f]
-codegenExpression (MLIR.MkExprStructureCreation ty fields) = do
-    tyStr <- codegenType True False Nothing [] ty
+codegenExpression (MLIR.MkExprStructureCreation fields) = do
+    types' <- readIORef types
+
+    let result = findType types' fields
+
+    let structType = maybe "" (\n -> Text.concat ["(struct ", n, ")"]) result
+
     fieldInits <-
         mapM
-            ( \(n, v) -> do
+            ( \(n, (v, _)) -> do
                 vStr <- codegenExpression v
                 pure $ Text.concat [".", n, " = ", vStr]
             )
             (Map.toList fields)
-    pure $ Text.concat ["(", tyStr, ") { ", Text.intercalate ", " fieldInits, " }"]
+    pure $ Text.concat [structType, " { ", Text.intercalate ", " fieldInits, " }"]
 codegenExpression (MLIR.MkExprUpdate e v) = do
     eStr <- codegenExpression e
     vStr <- codegenExpression v
@@ -251,7 +273,7 @@ codegenLiteral (MLIR.MkLitInt n) = pure $ Text.pack (show n)
 codegenLiteral (MLIR.MkLitFloat f) = pure $ Text.pack (show f)
 codegenLiteral (MLIR.MkLitBool True) = pure "true"
 codegenLiteral (MLIR.MkLitBool False) = pure "false"
-codegenLiteral (MLIR.MkLitString s) = 
+codegenLiteral (MLIR.MkLitString s) =
     pure $ Text.concat ["\"", encodeUnicode16 s, "\""]
 codegenLiteral (MLIR.MkLitChar c) = do
     let cShow = show (Text.singleton c)
@@ -325,7 +347,7 @@ codegenType shouldPutEnv ext def generics (args MLIR.:->: ret) = do
     argTypes <-
         Text.intercalate ", " <$> mapM (codegenType True ext Nothing generics) args
     retType <- codegenType shouldPutEnv ext Nothing generics ret
-    
+
     name <- freshSymbol
 
     let typedefLine = Text.concat ["typedef ", retType, " (*", name, ")(", argTypes, ");"]
@@ -333,35 +355,70 @@ codegenType shouldPutEnv ext def generics (args MLIR.:->: ret) = do
     modifyIORef' typedefs (<> [typedefLine])
 
     pure $ Text.concat [name, " ", fromMaybe "" def]
-codegenType _ ext def generics (MLIR.MkTyAnonymousStructure isUnion (MLIR.MkTyId "") fields) = do
-    fieldLines <- mapM
-        ( \(n, ty) -> do
-            tyStr <- codegenType True ext Nothing generics ty
-            pure $ Text.concat ["    ", tyStr, "; // ", varify n]
-        )
-        (Map.toList fields)
+codegenType shouldPutEnv ext def generics (HLIR.MkTyClosure env fun) = do
+    envType <- codegenType shouldPutEnv ext Nothing generics env
+    funType <- codegenType shouldPutEnv ext Nothing generics fun
 
-    let structOrUnion = if isUnion then "union" else "struct"
-    let typeDefName = fromMaybe "" def
-    let typedefLine =
-            Text.unlines
-                [ Text.concat ["typedef ", structOrUnion, " {"]
-                , Text.unlines fieldLines
-                , Text.concat ["} ", typeDefName, ";"]
-                ]
+    types' <- readIORef types
+    let found = findTypeByType types' (buildTypeWithRest [("environment", HLIR.MkTyPointer env), ("function", fun)] HLIR.MkTyRowEmpty)
 
-    modifyIORef' typedefs (<> [typedefLine])
+    case found of
+        Just typeName -> pure $ Text.concat [typeName, " ", fromMaybe "" def]
+        Nothing -> do
+            name <- ("_closure_" <>) <$> freshSymbol
 
-    pure $ Text.concat [structOrUnion, " ", typeDefName]
-codegenType shouldPutEnv ext def generics (MLIR.MkTyAnonymousStructure _ n _) = do
-    n' <- codegenType shouldPutEnv ext Nothing generics n
+            let structDef = Text.concat ["typedef struct ", name, " { ", envType, " environment; ", funType, " function; } ", name, ";"]
 
-    pure $ Text.concat [n', " ", fromMaybe "" def]
+            modifyIORef' typedefs (<> [structDef])
+            modifyIORef' types (<> [(buildTypeWithRest [("environment", env), ("function", fun)] HLIR.MkTyRowEmpty, name)])
+
+            pure $ Text.concat ["struct ", name, " ", fromMaybe "" def]
+codegenType shouldPutEnv ext def generics (HLIR.MkTyRecord recTy) = do
+    let ty = removeDuplicateFields (HLIR.MkTyRecord recTy)
+    types' <- readIORef types
+
+    let found = findTypeByType types' ty
+
+    case found of
+        Just typeName -> pure $ Text.concat [typeName, " ", fromMaybe "" def]
+        Nothing -> do
+            ty' <- case ty of
+                HLIR.MkTyRecord r -> 
+                    codegenType shouldPutEnv ext def generics r
+                _ -> codegenType shouldPutEnv ext def generics ty
+
+            name <- ("_record_" <>) <$> freshSymbol
+
+            let structDef = Text.concat ["typedef struct ", name, " { ", ty', "} ", name, ";"]
+
+            modifyIORef' typedefs (<> [structDef])
+            modifyIORef' types (<> [(ty, name)])
+
+            pure $ Text.concat ["struct ", name, " ", fromMaybe "" def]
 codegenType _ _ def _ (MLIR.MkTyQuantified _) = pure $ Text.concat ["void* ", fromMaybe "" def]
 codegenType _ _ _ _ t@(MLIR.MkTyApp _ _) =
     Err.compilerError
         $ "Type applications are not directly supported in C codegen: "
             <> Text.pack (show t)
+codegenType shouldPutEnv ext _ generics (MLIR.MkTyRowExtend field ty rest) = do
+    fieldTy <- codegenType shouldPutEnv ext Nothing generics ty
+    restTy <- codegenType shouldPutEnv ext Nothing generics rest
+    let structDef = Text.concat [fieldTy, " ", field, "; ", restTy]
+    pure structDef
+codegenType _ _ _ _ MLIR.MkTyRowEmpty = pure ""
+
+findTypeByType :: [(MLIR.Type, Text)] -> MLIR.Type -> Maybe Text
+findTypeByType ((t, n) : xs) (MLIR.MkTyRecord r) =
+    let (fields, _) = getAllFields r
+     in case t of
+            HLIR.MkTyRecord r' ->
+                let (fields', _) = getAllFields r'
+                 in if fields == fields'
+                        then Just n
+                        else findTypeByType xs (MLIR.MkTyRecord r)
+            _ -> findTypeByType xs (MLIR.MkTyRecord r)
+findTypeByType (_ : xs) ty = findTypeByType xs ty
+findTypeByType [] _ = Nothing
 
 isLambdaEnv :: MLIR.Type -> Bool
 isLambdaEnv (MLIR.MkTyId n) | "closure" `Text.isPrefixOf` n = True
@@ -449,3 +506,16 @@ freshSymbol :: (MonadIO m) => m Text
 freshSymbol = do
     idx <- atomicModifyIORef' symbolCounter (\i -> (i + 1, i))
     pure $ Text.pack ("_gen" <> show idx)
+
+removeDuplicateFields :: MLIR.Type -> MLIR.Type
+removeDuplicateFields (MLIR.MkTyRecord r) =
+    let (fields, rest) = getAllFields r
+     in HLIR.MkTyRecord (buildTypeWithRest (Map.toList fields) (removeDuplicateFields rest))
+removeDuplicateFields (MLIR.MkTyRowExtend label ty rest) =
+    HLIR.MkTyRowExtend label (removeDuplicateFields ty) (removeDuplicateFields rest)
+removeDuplicateFields t = t
+
+buildTypeWithRest :: [(Text, MLIR.Type)] -> MLIR.Type -> MLIR.Type
+buildTypeWithRest [] rest = rest
+buildTypeWithRest ((label, fieldType) : xs) rest =
+    HLIR.MkTyRowExtend label fieldType (buildTypeWithRest xs rest)
