@@ -130,6 +130,7 @@ executable reality
     optparse-applicative,
     reality,
     relude,
+    process,
 
   mixins:
     base hiding (Prelude),
