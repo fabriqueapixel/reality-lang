@@ -1,6 +1,5 @@
 module Language.Reality.Backend.Closure.Hoisting where
 
-import Data.Map qualified as Map
 import Data.Text qualified as Text
 import GHC.IO qualified as IO
 import Language.Reality.Syntax.HLIR qualified as HLIR
@@ -39,6 +38,9 @@ hoistLambdaSingular (HLIR.MkTopModuleDeclaration name body) = do
 hoistLambdaSingular (HLIR.MkTopPublic node) = do
     hoisted <- hoistLambdaSingular node
     pure (map HLIR.MkTopPublic hoisted)
+hoistLambdaSingular (HLIR.MkTopLet binding value) = do
+    (newValue, hoistedValue) <- hoistLambdasInExpr value
+    pure (hoistedValue ++ [HLIR.MkTopLet binding newValue])
 hoistLambdaSingular node = pure [node]
 
 -- | Hoist lambda expressions in a HLIR expression.
@@ -106,13 +108,11 @@ hoistLambdasInExpr (HLIR.MkExprCondition cond thenB elseB thenType elseType) = d
 hoistLambdasInExpr (HLIR.MkExprStructureAccess struct field) = do
     (newStruct, hoistedStruct) <- hoistLambdasInExpr struct
     pure (HLIR.MkExprStructureAccess newStruct field, hoistedStruct)
-hoistLambdasInExpr (HLIR.MkExprStructureCreation ann fields) = do
-    (newFields, hoistedFields) <- unzip <$> traverse (\(k, e) -> do
-        (ne, he) <- hoistLambdasInExpr e
-        pure ((k, ne), he)
-        ) (Map.toList fields)
+hoistLambdasInExpr (HLIR.MkExprStructureCreation k e r ty rTy) = do
+    (newE, hoistedE) <- hoistLambdasInExpr e
+    (newR, hoistedR) <- hoistLambdasInExpr r
 
-    pure (HLIR.MkExprStructureCreation ann (Map.fromList newFields), concat hoistedFields)
+    pure (HLIR.MkExprStructureCreation k newE newR ty rTy, hoistedE ++ hoistedR)
 hoistLambdasInExpr (HLIR.MkExprDereference e targetType) = do
     (newE, hoistedE) <- hoistLambdasInExpr e
     pure (HLIR.MkExprDereference newE targetType, hoistedE)
@@ -164,6 +164,7 @@ hoistLambdasInExpr (HLIR.MkExprLetPatternIn pat value inExpr ret) = do
     (newInExpr, hoistedInExpr) <- hoistLambdasInExpr inExpr
     pure
         (HLIR.MkExprLetPatternIn pat newValue newInExpr ret, hoistedValue ++ hoistedInExpr)
+hoistLambdasInExpr HLIR.MkExprStructureEmpty = pure (HLIR.MkExprStructureEmpty, [])
 
 {-# NOINLINE symbolCounter #-}
 symbolCounter :: IORef Int

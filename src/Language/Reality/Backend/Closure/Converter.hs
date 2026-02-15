@@ -8,9 +8,9 @@ import Data.Text qualified as Text
 import GHC.IO qualified as IO
 import Language.Reality.Backend.Closure.Free qualified as M
 import Language.Reality.Backend.Closure.Hoisting qualified as HT
-import Language.Reality.Frontend.Typechecker.Checker qualified as TC
 import Language.Reality.Syntax.HLIR qualified as HLIR
 import Language.Reality.Backend.Specialization.Resolver qualified as SR
+import qualified Data.List as List
 
 {-# NOINLINE structureDeclarations #-}
 structureDeclarations :: IORef [HLIR.TLIR "toplevel"]
@@ -26,8 +26,6 @@ convertTypeField (HLIR.MkStructStruct name fields) = do
 convertTypeField (HLIR.MkStructUnion name fields) = do
     (newFields, nss) <- mapAndUnzipM convertTypeField fields
     pure (HLIR.MkStructUnion name newFields, concat nss)
-
-
 
 getGC :: HLIR.TLIR "expression"
 getGC =
@@ -57,49 +55,6 @@ malloc t =
         , HLIR.returnType = Identity (HLIR.MkTyPointer HLIR.MkTyChar)
         }
 
-expandStructure :: (MonadIO m) => HLIR.TLIR "toplevel" -> m HLIR.Type
-expandStructure (HLIR.MkTopStructureDeclaration name fields) = do
-    newFields <- traverse expandTypeField fields
-    let ty = SR.fieldToType <$> newFields
-
-    pure $ HLIR.MkTyAnonymousStructure False (HLIR.MkTyId name.name) (Map.fromList ty)
-expandStructure (HLIR.MkTopLocated _ e) = expandStructure e
-expandStructure _ = error "Expected a structure declaration"
-
-
-expandTypeField :: (MonadIO m) => HLIR.StructureMember HLIR.Type -> m (HLIR.StructureMember HLIR.Type)
-expandTypeField (HLIR.MkStructField name ty) = do
-    newTy <- expandType ty
-    pure (HLIR.MkStructField name newTy)
-expandTypeField (HLIR.MkStructStruct name fields) = do
-    newFields <- mapM expandTypeField fields
-    pure (HLIR.MkStructStruct name newFields)
-expandTypeField (HLIR.MkStructUnion name fields) = do
-    newFields <- mapM expandTypeField fields
-    pure (HLIR.MkStructUnion name newFields)
-
-expandType :: (MonadIO m) => HLIR.Type -> m HLIR.Type
-expandType (HLIR.MkTyAnonymousStructure b ann fields) = do
-    (newAnn, _) <- convertType ann
-    (newFields, _) <- mapAndUnzipM convertType (Map.elems fields)
-    let fieldNames = Map.keys fields
-        fieldTypes = Map.fromList (zip fieldNames newFields)
-
-    pure $ HLIR.MkTyAnonymousStructure b newAnn fieldTypes
-expandType (HLIR.MkTyPointer pointee) = HLIR.MkTyPointer <$> expandType pointee
-expandType (HLIR.MkTyFun args ret) = do
-    newArgs <- mapM expandType args
-    newRet <- expandType ret
-    pure $ HLIR.MkTyFun newArgs newRet
-expandType (HLIR.MkTyId n) = do
-    structures' <- readIORef structures
-    case Map.lookup n structures' of
-        Just fields -> do
-            let structDecl = HLIR.MkTopStructureDeclaration (HLIR.MkAnnotation n []) fields
-            expandStructure structDecl
-        Nothing -> pure $ HLIR.MkTyId n
-expandType t = pure t
-
 findM :: (Monad m) => (a -> m (Maybe b)) -> [a] -> m (Maybe b)
 findM _ [] = pure Nothing
 findM p (x : xs) = do
@@ -107,6 +62,10 @@ findM p (x : xs) = do
     case r of
         Just y -> pure (Just y)
         Nothing -> findM p xs
+
+isVoidPointer :: HLIR.Type -> Bool
+isVoidPointer (HLIR.MkTyPointer (HLIR.MkTyId "void")) = True
+isVoidPointer _ = False
 
 -- | Convert a type to a closure-converted type.
 -- | This function takes a type, and returns a type with closures converted.
@@ -124,83 +83,45 @@ findM p (x : xs) = do
 -- | The function type will then be a pointer to this structure type.
 convertType :: (MonadIO m) => HLIR.Type -> m (HLIR.Type, [HLIR.TLIR "toplevel"])
 convertType (HLIR.MkTyFun argTypes returnType) = do
-    -- Converting type arguments to their closure-converted form
-    (newArgTypes, ns1) <- mapAndUnzipM convertType argTypes
-    (newReturnType, ns2) <- convertType returnType
+    case argTypes of
+        t:_ | isVoidPointer t -> do
+            (newReturnType, ns) <- convertType returnType
+            pure (HLIR.MkTyFun argTypes newReturnType, ns)
+        _ -> do
+            -- Converting type arguments to their closure-converted form
+            (newArgTypes, ns1) <- mapAndUnzipM convertType argTypes
+            (newReturnType, ns2) <- convertType returnType
 
-    -- Creating a unique name for the lambda structure
-    lambdaStructName <- freshSymbol "function_type_"
-
-    -- Creating the structure declaration for the lambda
-    let structDecl =
-            HLIR.MkTopStructureDeclaration
-                { HLIR.header = HLIR.MkAnnotation lambdaStructName []
-                , HLIR.fields =
-                    [
-                        HLIR.MkStructField "function"
-                            ( HLIR.MkTyFun
-                                ( HLIR.MkTyPointer HLIR.MkTyChar
+            -- Creating the structure declaration for the lambda
+            let t = buildType [
+                        ("function",
+                            HLIR.MkTyFun
+                                ( HLIR.MkTyPointer (HLIR.MkTyId "void")
                                     : newArgTypes
                                 )
                                 newReturnType
                             )
-                    ,   HLIR.MkStructField "environment" (HLIR.MkTyPointer HLIR.MkTyChar)
+                    ,   ("environment", HLIR.MkTyPointer (HLIR.MkTyId "void"))
                     ]
-                }
 
-    -- Expanding the structure to get a type with all types reduced
-    -- so we can compare it with existing structures
-    f1 <-
-        expandStructure structDecl >>= \case
-            HLIR.MkTyAnonymousStructure _ _ f -> pure f
-            _ -> pure Map.empty
-
-    found <-
-        findM
-            ( \node -> do
-                -- Also expand existing structures to compare them properly
-                -- (e.g. if they're strictly equal but with different names)
-                (name, f2) <-
-                    expandStructure node >>= \case
-                        HLIR.MkTyAnonymousStructure _ name f -> pure (Just name, f)
-                        _ -> pure (Nothing, Map.empty)
-
-                -- If the fields are the same, we can reuse the existing structure
-                -- otherwise, we need to create a new one
-                if f1 == f2
-                    then case name of
-                        Just n -> pure (Just n)
-                        Nothing -> pure Nothing
-                    else pure Nothing
-            )
-            =<< readIORef structureDeclarations
-
-    -- If we found an existing structure, reuse it
-    -- otherwise, add the new structure to the list of declarations
-    -- and return a pointer to it
-    -- We return the list of new structure declarations as well
-    -- so they can be added to the toplevel later
-    -- This way, we avoid duplicating structure declarations
-    -- for identical function types
-    case found of
-        Just nameTy -> pure (HLIR.MkTyPointer nameTy, [])
-        Nothing -> do
-            modifyIORef' structureDeclarations (<> [structDecl])
-
-            pure
-                ( HLIR.MkTyPointer (HLIR.MkTyId lambdaStructName)
-                , concat ns1 <> ns2 <> [structDecl]
-                )
+            -- If we found an existing structure, reuse it
+            -- otherwise, add the new structure to the list of declarations
+            -- and return a pointer to it
+            -- We return the list of new structure declarations as well
+            -- so they can be added to the toplevel later
+            -- This way, we avoid duplicating structure declarations
+            -- for identical function types
+            pure (HLIR.MkTyPointer t, concat ns1 <> ns2)
 convertType (HLIR.MkTyPointer pointee) = do
     (newPointee, ns) <- convertType pointee
     pure (HLIR.MkTyPointer newPointee, ns)
-convertType (HLIR.MkTyAnonymousStructure b ann fields) = do
-    (ty, ns) <- convertType ann
-    (tys, nss) <- mapAndUnzipM convertType (Map.elems fields)
-    let fieldNames = Map.keys fields
-        fieldTypes = Map.fromList (zip fieldNames tys)
-
-    pure (HLIR.MkTyAnonymousStructure b ty fieldTypes, mconcat nss <> ns)
+convertType (HLIR.MkTyRowExtend k vt rt) = do
+    (newVt, ns1) <- convertType vt
+    (newRt, ns2) <- convertType rt
+    pure (HLIR.MkTyRowExtend k newVt newRt, ns1 <> ns2)
+convertType (HLIR.MkTyRecord t) = do
+    (t', ns) <- convertType t
+    pure (HLIR.MkTyRecord t', ns)
 convertType t = pure (t, [])
 
 -- | Convert a program to a closure-converted program.
@@ -284,18 +205,6 @@ convertSingularNode (HLIR.MkTopConstantDeclaration name expr) = do
 convertSingularNode (HLIR.MkTopLocated p e) = do
     ns <- convertSingularNode e
     pure (map (HLIR.MkTopLocated p) ns)
-convertSingularNode (HLIR.MkTopStructureDeclaration name fields) = do
-    (nss, newFields) <-
-        mapAndUnzipM
-            ( \field -> do
-                (newFieldType, ns) <- convertTypeField field
-                pure (ns, newFieldType)
-            )
-            fields
-
-    modifyIORef' structures (Map.insert name.name newFields)
-    pure
-        $ concat nss <> [HLIR.MkTopStructureDeclaration name newFields]
 convertSingularNode (HLIR.MkTopPublic node) = do
     ns <- convertSingularNode node
     pure (map HLIR.MkTopPublic ns)
@@ -554,64 +463,31 @@ convertExpression (HLIR.MkExprCondition cond thenB elseB _ _) = do
 convertExpression (HLIR.MkExprStructureAccess struct field) = do
     (newStruct, ns, structTy) <- convertExpression struct
 
-    -- Looking up the structure fields in the global structure environment
-    -- to find the type of the accessed field
-    structures' <- readIORef structures
-    let name = TC.getHeader structTy
+    let m = getAllTypeFields structTy
 
-    case structTy of
-        -- If the structure is anonymous, we can directly look up the field
-        -- in its fields
-        HLIR.MkTyAnonymousStructure _ _ fields -> case Map.lookup field fields of
-            Just ty -> pure (HLIR.MkExprStructureAccess newStruct field, ns, ty)
-            Nothing -> M.compilerError $ "Field " <> field <> " does not exist in structure"
-        _ -> case name of
-            -- If the structure is named, we look it up in the global environment
-            -- to find its fields
-            Just structName | Just fields <- Map.lookup structName structures' ->
-                case lookupField field fields of
-                    Just ty -> pure (HLIR.MkExprStructureAccess newStruct field, ns, ty)
-                    -- If the field is not found, we raise a compiler error
-                    Nothing ->
-                        M.compilerError
-                            $ "Field " <> field <> " does not exist in structure " <> structName
-            -- If the structure is not found, we raise a compiler error
-            _ -> M.compilerError $ 
-                "Expected a structure type: " 
-                    <> show structTy 
-                    <> " for expression: "
-                    <> toText struct <> "." <> field
-
+    case Map.lookup field m of
+        Just fieldTy -> pure (HLIR.MkExprStructureAccess newStruct field, ns, fieldTy)
+        Nothing ->
+            M.compilerError $ "Field " <> field <> " not found in type " <> show structTy
     where
-        lookupField :: Text -> [HLIR.StructureMember HLIR.Type] -> Maybe HLIR.Type
-        lookupField fName = foldr
-                ( \member acc ->
-                    case member of
-                        HLIR.MkStructField mName mType ->
-                            if mName == fName then Just mType else acc
-                        HLIR.MkStructStruct mName mFields -> do
-                            let fieldsAsType = Map.fromList $ map SR.fieldToType mFields
-                            if mName == fName
-                                then Just (HLIR.MkTyAnonymousStructure False (HLIR.MkTyId mName) fieldsAsType)
-                                else acc
-                        HLIR.MkStructUnion mName mFields -> do
-                            let fieldsAsType = Map.fromList $ map SR.fieldToType mFields
-                            if mName == fName
-                                then Just (HLIR.MkTyAnonymousStructure True (HLIR.MkTyId mName) fieldsAsType)
-                                else acc
-                )
-                Nothing
-convertExpression (HLIR.MkExprStructureCreation ann fields) = do
-    (newFields, nss, tys) <- unzip3 <$> mapM convertExpression (Map.elems fields)
-    let fieldNames = Map.keys fields
-        newFieldMap = Map.fromList (zip fieldNames newFields)
-        fieldTypes = Map.fromList (zip fieldNames tys)
+        getAllTypeFields :: HLIR.Type -> Map Text.Text HLIR.Type
+        getAllTypeFields (HLIR.MkTyRecord fields) = getAllTypeFields fields
+        getAllTypeFields HLIR.MkTyRowEmpty = Map.empty
+        getAllTypeFields (HLIR.MkTyRowExtend label fieldType rest) = Map.insert label fieldType (getAllTypeFields rest)
+        getAllTypeFields _ = Map.empty
+convertExpression (HLIR.MkExprStructureCreation k e r _ _) = do
+    (newE, ns1, t) <- convertExpression e
+    (newR, ns2, rt) <- convertExpression r
+
+    rt' <- HLIR.sanitizeRecord $ HLIR.MkTyRowExtend k t rt
 
     pure
-        ( HLIR.MkExprStructureCreation ann newFieldMap
-        , mconcat nss
-        , HLIR.MkTyAnonymousStructure False ann fieldTypes
+        ( HLIR.MkExprStructureCreation  k newE newR (Identity t) (Identity rt')
+        , ns1 <> ns2
+        , rt'
         )
+convertExpression HLIR.MkExprStructureEmpty =
+    pure (HLIR.MkExprStructureEmpty, [], HLIR.MkTyRecord HLIR.MkTyRowEmpty)
 convertExpression (HLIR.MkExprDereference e _) = do
     (newE, ns, eTy) <- convertExpression e
 
@@ -692,16 +568,27 @@ convertExpression (HLIR.MkExprLetPatternIn pattern value inExpr _) = do
         , inTy
         )
 
+buildMap :: Map Text (HLIR.TLIR "expression", HLIR.Type) -> HLIR.TLIR "expression"
+buildMap m = fst $ List.foldl' (\(acc, rt) (k, (v, t)) -> do
+        let newAcc = HLIR.MkExprStructureCreation k v  acc (Identity t) (Identity rt)
+        let newRt = HLIR.MkTyRowExtend k t rt
+
+        (newAcc, newRt)
+    ) (HLIR.MkExprStructureEmpty, HLIR.MkTyRowEmpty) (Map.toList m)
+
+buildType :: [(Text, HLIR.Type)] -> HLIR.Type
+buildType = HLIR.MkTyRecord . List.foldl' (\acc (k, t) -> HLIR.MkTyRowExtend k t acc) HLIR.MkTyRowEmpty
+
 convertPattern :: (MonadIO m) => HLIR.TLIR "pattern" -> m (HLIR.TLIR "pattern", [HLIR.TLIR "toplevel"])
 convertPattern (HLIR.MkPatternLocated _ p) = convertPattern p
 convertPattern (HLIR.MkPatternLiteral lit) = pure (HLIR.MkPatternLiteral lit, [])
 convertPattern (HLIR.MkPatternVariable ann) = pure (HLIR.MkPatternVariable ann, [])
 convertPattern HLIR.MkPatternWildcard = pure (HLIR.MkPatternWildcard, [])
-convertPattern (HLIR.MkPatternStructure ann fields) = do
+convertPattern (HLIR.MkPatternStructure fields) = do
     (newFields, nss) <- mapAndUnzipM convertPattern (Map.elems fields)
     let fieldNames = Map.keys fields
         newFieldMap = Map.fromList (zip fieldNames newFields)
-    pure (HLIR.MkPatternStructure ann newFieldMap, mconcat nss)
+    pure (HLIR.MkPatternStructure newFieldMap, mconcat nss)
 convertPattern (HLIR.MkPatternConstructor name patterns ty) = do
     (newPatterns, nss) <- mapAndUnzipM convertPattern patterns
     pure (HLIR.MkPatternConstructor name newPatterns ty, mconcat nss)
@@ -734,12 +621,12 @@ convertLambda (HLIR.MkExprLambda args _ body) reserved = do
     let finalNativeFunctions = (nativeFunctions <> globalFunctions) Map.\\ arguments
     let preEnvironment = freeVariablesInBody Map.\\ (finalNativeFunctions <> arguments <> reserved)
     (ns, environment) <-
-        sequence <$> traverse ((swap <$>) . convertType) preEnvironment
+        sequence <$> traverse ((second HLIR.MkTyPointer <$>) . (swap <$>) . convertType) preEnvironment
 
     -- Creating unique names for the environment and lambda structures
     -- to avoid name collisions
-    environmentStructName <- freshSymbol "closure_env_"
-    lambdaStructName <- freshSymbol "closure_fn_"
+    -- environmentStructName <- freshSymbol "closure_env_"
+    -- lambdaStructName <- freshSymbol "closure_fn_"
 
     -- Creating both the environment structure declaration and its creation expression
     -- to be used in the closure structure creation:
@@ -755,22 +642,46 @@ convertLambda (HLIR.MkExprLambda args _ body) reserved = do
     --   x1 = x1,
     --  ...
     -- }
-    let environmentStructure =
-            HLIR.MkTopStructureDeclaration
-                { HLIR.header = HLIR.MkAnnotation environmentStructName []
-                , HLIR.fields = map (uncurry HLIR.MkStructField) (Map.toList environment)
-                }
-        environmentStructCreation =
-            HLIR.MkExprStructureCreation
-                { HLIR.annotation = HLIR.MkTyId environmentStructName
-                , HLIR.fields =
-                    Map.mapWithKey
-                        (\name ty -> HLIR.MkExprVariable (HLIR.MkAnnotation name (Identity ty)) [])
-                        environment
-                }
+
+    let createLet :: MonadIO m => Text -> HLIR.Type -> m (HLIR.TLIR "expression", HLIR.Type)
+        createLet name ptr@(HLIR.MkTyPointer ty) = do
+            name' <- freshSymbol (name <> "_")
+
+            pure (HLIR.MkExprLetIn
+                { HLIR.binding = HLIR.MkAnnotation name' (Identity ptr)
+                , HLIR.value = malloc ty
+                , HLIR.inExpr =
+                    HLIR.MkExprLetIn
+                        { HLIR.binding = HLIR.MkAnnotation "_" (Identity ty)
+                        , HLIR.value = HLIR.MkExprUpdate
+                        (HLIR.MkExprDereference
+                                    (HLIR.MkExprVariable
+                                        (HLIR.MkAnnotation name' (Identity ptr))
+                                        []
+                                    )
+                                    (Identity ty)
+                                )
+                                (HLIR.MkExprVariable
+                                    (HLIR.MkAnnotation name (Identity ty))
+                                    []
+                                )
+                                (Identity ty)
+                        , HLIR.inExpr = HLIR.MkExprVariable (HLIR.MkAnnotation name' (Identity ptr)) []
+                        , HLIR.returnType = Identity ptr
+                        }
+                , HLIR.returnType = Identity ptr
+                }, ptr)
+        createLet _ _ = M.compilerError "Expected a pointer type in the environment"
+
+    let environmentType = buildType (Map.toList environment)
+
+    envVars <- Map.traverseWithKey createLet environment
+
+    let environmentStructCreation =
+            HLIR.MkExprCast (buildMap envVars) environmentType
         environmentVar =
             HLIR.MkExprVariable
-                (HLIR.MkAnnotation "env" (Identity (HLIR.MkTyId environmentStructName)))
+                (HLIR.MkAnnotation "env" (Identity environmentType))
                 []
 
     -- Adding the arguments to the local environment so that they can be referenced
@@ -794,19 +705,24 @@ convertLambda (HLIR.MkExprLambda args _ body) reserved = do
     let newBody' =
             foldr
                 ( \(name, ty) acc ->
-                    HLIR.MkExprLetIn
-                        { HLIR.binding = HLIR.MkAnnotation name (Identity ty)
-                        , HLIR.value =
-                            HLIR.MkExprStructureAccess
-                                { HLIR.structure =
+                    case ty of
+                        HLIR.MkTyPointer pointee ->
+                            HLIR.MkExprLetIn
+                                { HLIR.binding = HLIR.MkAnnotation name (Identity pointee)
+                                , HLIR.value =
                                     HLIR.MkExprDereference
-                                        environmentVar
-                                        (Identity (HLIR.MkTyId environmentStructName))
-                                , HLIR.field = name
+                                        (HLIR.MkExprStructureAccess
+                                            { HLIR.structure =
+                                                HLIR.MkExprDereference
+                                                    environmentVar
+                                                    (Identity environmentType)
+                                            , HLIR.field = name
+                                            })
+                                        (Identity pointee)
+                                , HLIR.inExpr = acc
+                                , HLIR.returnType = Identity newReturnType
                                 }
-                        , HLIR.inExpr = acc
-                        , HLIR.returnType = Identity newReturnType
-                        }
+                        _ -> M.compilerError "Expected a pointer type in the environment"
                 )
                 newBody
                 (Map.toList environment)
@@ -831,21 +747,16 @@ convertLambda (HLIR.MkExprLambda args _ body) reserved = do
     -- Environment is passed as a pointer to avoid sizeof issues when
     -- the structure is empty (because of void* environment carried by
     -- generic closures).
-    let lambdaStructure =
-            HLIR.MkTopStructureDeclaration
-                { HLIR.header = HLIR.MkAnnotation lambdaStructName []
-                , HLIR.fields =
-                    [
-                        HLIR.MkStructField "function"
-                            ( HLIR.MkTyFun
-                                ( HLIR.MkTyPointer (HLIR.MkTyId environmentStructName)
-                                    : map (runIdentity . (.typeValue)) typedArguments
-                                )
-                                newReturnType
-                            )
-                    , HLIR.MkStructField "environment" (HLIR.MkTyPointer (HLIR.MkTyId environmentStructName))
-                    ]
-                }
+    let lambdaStructureType =
+            buildType
+                [ ("function",
+                    HLIR.MkTyFun
+                        ( HLIR.MkTyPointer environmentType
+                            : map (runIdentity . (.typeValue)) typedArguments
+                        )
+                        newReturnType)
+                , ("environment", HLIR.MkTyPointer environmentType)
+                ]
 
     -- Creating the environment allocation. We need this because closures
     -- may outlive their defining scope, so we need to allocate them on the heap.
@@ -857,22 +768,22 @@ convertLambda (HLIR.MkExprLambda args _ body) reserved = do
     -- let env_alloc_X = malloc(env);
     --    *env_alloc_X = env { ... };
     envAllocName <- freshSymbol "env_alloc_"
-    let envAlloc = malloc (HLIR.MkTyId environmentStructName)
+    let envAlloc = malloc environmentType
         envAllocVar =
             HLIR.MkExprVariable
                 ( HLIR.MkAnnotation
                     envAllocName
-                    (Identity (HLIR.MkTyPointer (HLIR.MkTyId environmentStructName)))
+                    (Identity (HLIR.MkTyPointer environmentType))
                 )
                 []
         envUpdate =
             HLIR.MkExprUpdate
                 ( HLIR.MkExprDereference
                     envAllocVar
-                    (Identity (HLIR.MkTyId environmentStructName))
+                    (Identity environmentType)
                 )
                 environmentStructCreation
-                (Identity (HLIR.MkTyId environmentStructName))
+                (Identity environmentType)
 
     -- Creating the lambda structure creation expression:
     --
@@ -881,28 +792,28 @@ convertLambda (HLIR.MkExprLambda args _ body) reserved = do
     --   environment = env_alloc_X
     -- }
     let lambdaStructureCreation =
-            HLIR.MkExprStructureCreation
-                { HLIR.annotation = HLIR.MkTyId lambdaStructName
-                , HLIR.fields =
-                    Map.fromList
+            HLIR.MkExprCast
+                (buildMap (Map.fromList
                         [
                             ( "function"
-                            , HLIR.MkExprLambda
+                            , (HLIR.MkExprLambda
                                 { HLIR.parameters =
                                     HLIR.MkAnnotation
                                         "env"
-                                        (Identity (HLIR.MkTyPointer (HLIR.MkTyId environmentStructName)))
+                                        (Identity (HLIR.MkTyPointer environmentType))
                                         : typedArguments
                                 , HLIR.returnType = Identity newReturnType
                                 , HLIR.body = newBody'
-                                }
+                                },
+                                    HLIR.MkTyFun ( HLIR.MkTyPointer environmentType : map (runIdentity . (.typeValue)) typedArguments) newReturnType
+                                )
                             )
                         ,
                             ( "environment"
-                            , envAllocVar
+                            , (envAllocVar, HLIR.MkTyPointer environmentType)
                             )
-                        ]
-                }
+                        ]))
+                lambdaStructureType
 
     -- We do similarly for the lambda structure:
     --
@@ -910,22 +821,22 @@ convertLambda (HLIR.MkExprLambda args _ body) reserved = do
     --   *lambda_alloc_X = lambda { ... };
     -- return (lambda_alloc_X : void*);
     lambdaStructAllocName <- freshSymbol "lambda_alloc_"
-    let lambdaStructAlloc = malloc (HLIR.MkTyId lambdaStructName)
+    let lambdaStructAlloc = malloc lambdaStructureType
         lambdaStructAllocVar =
             HLIR.MkExprVariable
                 ( HLIR.MkAnnotation
                     lambdaStructAllocName
-                    (Identity (HLIR.MkTyPointer (HLIR.MkTyId lambdaStructName)))
+                    (Identity (HLIR.MkTyPointer lambdaStructureType))
                 )
                 []
         lambdaStructUpdate =
             HLIR.MkExprUpdate
                 ( HLIR.MkExprDereference
                     lambdaStructAllocVar
-                    (Identity (HLIR.MkTyId lambdaStructName))
+                    (Identity lambdaStructureType)
                 )
                 lambdaStructureCreation
-                (Identity (HLIR.MkTyId lambdaStructName))
+                (Identity lambdaStructureType)
 
     -- Casting the lambda structure pointer to void* to match every type
     -- of generic closure, as closures are passed by reference, by
@@ -946,10 +857,10 @@ convertLambda (HLIR.MkExprLambda args _ body) reserved = do
                         { HLIR.binding = HLIR.MkAnnotation "_" (Identity (HLIR.MkTyId "void"))
                         , HLIR.value = lambdaStructUpdate
                         , HLIR.inExpr = castAndReference
-                        , HLIR.returnType = Identity (HLIR.MkTyPointer (HLIR.MkTyId lambdaStructName))
+                        , HLIR.returnType = Identity (HLIR.MkTyPointer lambdaStructureType)
                         }
                 , HLIR.returnType =
-                    Identity (HLIR.MkTyPointer (HLIR.MkTyId environmentStructName))
+                    Identity (HLIR.MkTyPointer environmentType)
                 }
 
     -- We broke the code logic down to make it more readable, but
@@ -963,19 +874,19 @@ convertLambda (HLIR.MkExprLambda args _ body) reserved = do
                 { HLIR.binding =
                     HLIR.MkAnnotation
                         envAllocName
-                        (Identity (HLIR.MkTyPointer (HLIR.MkTyId environmentStructName)))
+                        (Identity (HLIR.MkTyPointer environmentType))
                 , HLIR.value = envAlloc
                 , HLIR.inExpr =
                     HLIR.MkExprLetIn
                         { HLIR.binding =
                             HLIR.MkAnnotation
                                 lambdaStructAllocName
-                                (Identity (HLIR.MkTyPointer (HLIR.MkTyId lambdaStructName)))
+                                (Identity (HLIR.MkTyPointer lambdaStructureType))
                         , HLIR.value = lambdaStructAlloc
                         , HLIR.inExpr = updates
-                        , HLIR.returnType = Identity (HLIR.MkTyPointer (HLIR.MkTyId lambdaStructName))
+                        , HLIR.returnType = Identity (HLIR.MkTyPointer lambdaStructureType)
                         }
-                , HLIR.returnType = Identity (HLIR.MkTyPointer (HLIR.MkTyId lambdaStructName))
+                , HLIR.returnType = Identity (HLIR.MkTyPointer environmentType)
                 }
 
     -- Returning the final expression, along with the new toplevel nodes
@@ -984,8 +895,8 @@ convertLambda (HLIR.MkExprLambda args _ body) reserved = do
     -- lambda structure)
     pure
         ( lets
-        , ns <> ns1 <> ns2 <> [environmentStructure, lambdaStructure]
-        , HLIR.MkTyPointer (HLIR.MkTyId lambdaStructName)
+        , ns <> ns1 <> ns2
+        , HLIR.MkTyPointer lambdaStructureType
         )
 convertLambda _ _ = M.compilerError "Expected a lambda expression"
 
