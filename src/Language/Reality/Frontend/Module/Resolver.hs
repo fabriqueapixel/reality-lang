@@ -80,20 +80,6 @@ resolveModuleSingular
                 }
             ]
 resolveModuleSingular
-    ( HLIR.MkTopStructureDeclaration
-            { HLIR.header = HLIR.MkAnnotation name generics
-            , HLIR.fields = fields
-            }
-        )
-    paths = do
-        let newName = createName paths name
-        pure
-            [ HLIR.MkTopStructureDeclaration
-                { HLIR.header = HLIR.MkAnnotation newName generics
-                , HLIR.fields = fields
-                }
-            ]
-resolveModuleSingular
     (HLIR.MkTopEnumeration
         { HLIR.name = HLIR.MkAnnotation name generics
         , HLIR.constructors = constructors

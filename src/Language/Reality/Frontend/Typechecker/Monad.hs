@@ -205,7 +205,9 @@ applySubstitution s (HLIR.MkTyVar tvr) = do
     tv <- liftIO $ readIORef tvr
     case tv of
         HLIR.Link ty -> applySubstitution s ty
-        HLIR.Unbound{} -> pure $ HLIR.MkTyVar tvr
+        HLIR.Unbound n _ -> pure $ case Map.lookup n s of
+            Just ty -> ty
+            Nothing -> HLIR.MkTyVar tvr
 applySubstitution s (HLIR.MkTyApp t ts) = do
     t' <- applySubstitution s t
     ts' <- mapM (applySubstitution s) ts
@@ -218,10 +220,11 @@ applySubstitution s (HLIR.MkTyQuantified name) =
     case Map.lookup name s of
         Just ty -> pure ty
         Nothing -> pure $ HLIR.MkTyQuantified name
-applySubstitution s (HLIR.MkTyAnonymousStructure b n fields) = do
-    n' <- applySubstitution s n
-    fields' <-
-        Map.traverseWithKey
-            (\_ ty -> applySubstitution s ty)
-            fields
-    pure $ HLIR.MkTyAnonymousStructure b n' fields'
+applySubstitution s (HLIR.MkTyRecord t) = do
+    t' <- applySubstitution s t
+    pure $ HLIR.MkTyRecord t'   
+applySubstitution _ HLIR.MkTyRowEmpty = pure HLIR.MkTyRowEmpty
+applySubstitution s (HLIR.MkTyRowExtend label fieldType rest) = do
+    fieldType' <- applySubstitution s fieldType
+    rest' <- applySubstitution s rest
+    pure $ HLIR.MkTyRowExtend label fieldType' rest'
