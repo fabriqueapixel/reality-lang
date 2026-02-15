@@ -294,5 +294,5 @@ fn build_command(cwd: String, args: List<CLI>, config: List<*Configuration>) -> 
 
     LF.success("Build succeeded! Binary located at " + color(Black) + cwd + "/output/program" + reset_code());
 
-    return None;
+    return Some(cwd + "/output/program");
 }
