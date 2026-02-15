@@ -25,7 +25,7 @@ if len(executable_files) == 0:
   exit(1)
 
 executable = executable_files[0]
-executable_out = f"rlc{ext}"
+executable_out = f"rl{ext}"
 
 if not os.path.isdir('bin'): os.mkdir('bin')
 
@@ -35,11 +35,11 @@ print(f"Reality compiler installed to bin/{executable_out}")
 
 # Installing LF project manager
 
-cmd = f"bin/rlc{ext} packages/lf/main.rl -p std=$REALITY_DIR/std -p core=$REALITY_DIR/packages/lf -I \"<stdio.h>\" -I \"<string.h>\""
+cmd = f"bin/rl{ext} packages/lf/main.rl -p std=$REALITY_DIR/std -p core=$REALITY_DIR/packages/lf -I \"<stdio.h>\" -I \"<string.h>\""
 
 system(cmd)
 
-gcc_cmd = f"gcc packages/lf/main.c $REALITY_DIR/libc/String.c $REALITY_DIR/libc/Actor.c $LIBGC/lib/libgc.a -I$LIBGC/include/ packages/lf/libc/System.c -lm -w -o bin/lf{ext} -DRELEASE_MODE -O3"
+gcc_cmd = f"bin/rl{ext} c packages/lf/main.c -l packages/lf/libc/System.c -f lm -f w -o bin/lf{ext} -f DRELEASE_MODE -f O3"
 
 system(gcc_cmd)
 
