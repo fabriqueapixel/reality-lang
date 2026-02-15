@@ -51,7 +51,7 @@ parseAnnotation' ::
     (MonadIO m) => P.Parser m a -> P.Parser m (HLIR.Annotation a)
 parseAnnotation' p = HLIR.MkAnnotation . snd <$> Lex.identifier <*> (Lex.symbol ":" *> p)
 
--- | PARSE A STRING INTERPOLATION LITERAL 
+-- | PARSE A STRING INTERPOLATION LITERAL
 -- | Parse a string interpolation literal. A string interpolation literal is a
 -- | string literal that contains expressions that are evaluated and inserted
 -- | into the string. The syntax of a string interpolation literal is as follows:
@@ -87,7 +87,7 @@ parseInterpolatedString = do
         end <- P.getSourcePos
 
         pure ((start, end), stringInit (fromString (Text.printf "\\%s" [char])))
-    
+
     stringSegment = P.choice
         [ interpolation
         , escapeBracket
@@ -161,14 +161,14 @@ parseExprLiteral =
     parseLiteralSuffix ::
         (MonadIO m) => P.Parser m (HLIR.Position, HLIR.HLIR "expression")
     parseLiteralSuffix = Lex.lexeme $ do
-        lit <- (HLIR.MkExprLiteral <$> Lit.parseLiteral) 
+        lit <- (HLIR.MkExprLiteral <$> Lit.parseLiteral)
             <|> (snd <$> parseInterpolatedString)
             <|> (HLIR.MkExprLiteral . HLIR.MkLitString <$> Lit.parseString)
 
         let lit' = case lit of
                     HLIR.MkExprLiteral (HLIR.MkLitString _) -> HLIR.MkExprVarCall "String.init" [lit]
                     _ -> lit
-        
+
         pure lit'
 
 -- | PARSE TERNARY
@@ -355,14 +355,14 @@ parseExprList = do
 
     let newList  = HLIR.MkExprVarCall "List.init" []
 
-        letRefIn = HLIR.MkExprLetIn 
-                    (HLIR.MkAnnotation (idx <> "_list_ref") Nothing) 
+        letRefIn = HLIR.MkExprLetIn
+                    (HLIR.MkAnnotation (idx <> "_list_ref") Nothing)
                     (HLIR.MkExprReference (HLIR.MkExprVariable (HLIR.MkAnnotation (idx <> "_list") Nothing) []) Nothing)
                     letResIn
                     Nothing
 
-        letIn = HLIR.MkExprLetIn 
-                    (HLIR.MkAnnotation (idx <> "_list") Nothing) 
+        letIn = HLIR.MkExprLetIn
+                    (HLIR.MkAnnotation (idx <> "_list") Nothing)
                     newList
                     letRefIn
                     Nothing
@@ -370,13 +370,18 @@ parseExprList = do
         listExpr = foldl' addElement (HLIR.MkExprVariable (HLIR.MkAnnotation (idx <> "_list_ref") Nothing) []) elements
         addElement acc el = HLIR.MkExprFunctionAccess "push" acc [] [el]
 
-        letResIn = HLIR.MkExprLetIn 
-                    (HLIR.MkAnnotation (idx <> "_ignore") Nothing) 
+        letResIn = HLIR.MkExprLetIn
+                    (HLIR.MkAnnotation (idx <> "_ignore") Nothing)
                     listExpr
                     (HLIR.MkExprDereference (HLIR.MkExprVariable (HLIR.MkAnnotation (idx <> "_list_ref") Nothing) []) Nothing)
                     Nothing
 
     pure (pos, letIn)
+
+data Field
+    = Field Text (HLIR.HLIR "expression")
+    | Spread (HLIR.HLIR "expression")
+    deriving (Eq)
 
 -- | PARSE STRUCTURE CREATION
 -- | Parse a structure creation expression. A structure creation expression is an
@@ -388,15 +393,34 @@ parseExprList = do
 parseExprStructCreation ::
     (MonadIO m) => P.Parser m (HLIR.Position, HLIR.HLIR "expression")
 parseExprStructCreation = do
-    void $ Lex.reserved "struct"
+    ((start, _), _) <- Lex.symbol "{"
 
-    ((start, _), header) <- Typ.parseType
+    fields <- P.sepBy (parseField <|> parseSpread) Lex.comma
 
-    ((_, end), fields) <- Lex.braces $ Map.fromList <$> P.sepBy parseField Lex.comma
+    ((_, end), _) <- Lex.symbol "}"
 
-    pure ((start, end), HLIR.MkExprStructureCreation header fields)
+    rest <- getSpread fields
+
+    let rest' = fromMaybe HLIR.MkExprStructureEmpty rest
+    let fields' = getFields fields
+
+    let builtRecord = List.foldl (\acc (fieldName, fieldValue) -> HLIR.MkExprStructureCreation fieldName fieldValue acc Nothing Nothing) rest' fields'
+
+    pure ((start, end), builtRecord)
   where
-    parseField :: (MonadIO m) => P.Parser m (Text, HLIR.HLIR "expression")
+    getFields :: [Field] -> [(Text, HLIR.HLIR "expression")]
+    getFields [] = []
+    getFields (Field name value : xs) = (name, value) : getFields xs
+    getFields (Spread _ : xs) = getFields xs
+
+    getSpread :: MonadIO m => [Field] -> P.Parser m (Maybe (HLIR.HLIR "expression"))
+    getSpread [] = pure Nothing
+    getSpread (Spread value : xs)
+        | null xs = pure (Just value)
+        | otherwise = fail "Spread field must be the last field in the structure creation expression"
+    getSpread (_ : xs) = getSpread xs
+
+    parseField :: (MonadIO m) => P.Parser m Field
     parseField = do
         name <- snd <$> Lex.identifier
 
@@ -404,7 +428,13 @@ parseExprStructCreation = do
 
         value <- snd <$> parseExprFull
 
-        pure (name, value)
+        pure (Field name value)
+
+    parseSpread :: (MonadIO m) => P.Parser m Field
+    parseSpread = do
+        void $ Lex.symbol ".."
+        value <- snd <$> parseExprFull
+        pure (Spread value)
 
 -- | PARSE SIZEOF EXPRESSION
 -- | Parse a sizeof expression. A sizeof expression is an expression that consists
@@ -445,12 +475,9 @@ parsePatternFull =
                 ((start, _), name) <- Lex.identifier
                 ((_, end), args) <- Lex.parens (P.sepBy (snd <$> parsePatternFull) Lex.comma)
                 pure ((start, end), HLIR.MkPatternConstructor name args Nothing)
-            
+
             , P.try $ do
-                ((start, _), _) <- Lex.reserved "struct"
-                (_, name) <- Typ.parseType
-                
-                void $ Lex.symbol "{"
+                ((start, _), _) <- Lex.symbol "{"
                 patterns <- P.sepBy (do
                     fieldName <- snd <$> Lex.identifier
                     fieldValue <- P.optional (Lex.symbol ":" *> (snd <$> parsePatternFull))
@@ -461,8 +488,8 @@ parsePatternFull =
                     ) Lex.comma
                 ((_, end), _) <- Lex.symbol "}"
 
-                pure ((start, end), HLIR.MkPatternStructure name (Map.fromList patterns))
-                
+                pure ((start, end), HLIR.MkPatternStructure (Map.fromList patterns))
+
             , do
                 (pos, name) <- Lex.identifier
                 pure (pos, HLIR.MkPatternVariable (HLIR.MkAnnotation name Nothing))
@@ -508,11 +535,11 @@ parseExprTerm =
     Lex.locateWith
         <$> P.choice
             [ parseExprTuple
+            , P.try parseExprStructCreation
             , parseExprBlock
             , parseExprLambda
             , parseExprSizeOf
             , parseExprTernary
-            , P.try parseExprStructCreation
             , parseExprLetIn
             , parseExprLiteral
             , P.try parseExprVariable
@@ -819,9 +846,9 @@ parseStmtLetPatternIn = do
     (_, pattern) <- parsePatternFull
     void $ Lex.symbol "="
     ((_, end), value) <- parseExprFull
-    
+
     case getPatVar pattern of
-        Just ann ->  
+        Just ann ->
             pure (
                 (start, end)
                 , HLIR.MkExprLetIn

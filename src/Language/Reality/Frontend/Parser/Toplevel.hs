@@ -90,6 +90,19 @@ parseTopTypeAlias = do
             ]
         )
 
+-- | PARSE LET NODE
+-- | A let node is a top-level construct that defines a variable. Variables
+-- | are defined using the `let` keyword. Variables are similar to constants,
+-- | but they can be reassigned. Variables are defined as follows:
+-- | - let <name>: <type> = <expression>
+parseTopLet ::
+    (MonadIO m) => P.Parser m (HLIR.Position, [HLIR.HLIR "toplevel"])
+parseTopLet = do
+    ((start, _), _) <- Lex.reserved "let"
+    idt <- P.parseAnnotation (snd <$> Typ.parseType)
+    ((_, end), expr) <- Lex.symbol "=" *> P.parseExprFull
+    pure ((start, end), [HLIR.MkTopLet idt expr])
+
 -- | PARSE IMPORT NODE
 -- | An import node is a top-level construct that defines an import
 -- | statement. Import statements are defined using the `import` keyword.
@@ -138,40 +151,6 @@ parseTopModuleDeclaration = do
     ((_, end), nodes) <-
         Lex.braces (P.many (snd <$> parseTopFull <* P.optional Lex.semi))
     pure ((start, end), [HLIR.MkTopModuleDeclaration idt (concat nodes)])
-
--- | PARSE STRUCTURE DECLARATION NODE
--- | A structure declaration node is a top-level construct that defines a
--- | structure. Structures are defined using the `struct` keyword.
--- | Structures are similar to structs in Rust. They are defined as follows:
--- |
--- | - struct <name>[<generic>*] { <field>: <type>, ... }
-parseTopStructureDeclaration ::
-    (MonadIO m) => P.Parser m (HLIR.Position, [HLIR.HLIR "toplevel"])
-parseTopStructureDeclaration = do
-    ((start, _), _) <- Lex.reserved "struct"
-
-    (_, idt) <- Lex.identifier
-    generics <- P.option mempty $ do
-        (_, gens) <- Lex.angles (P.sepBy1 (snd <$> Lex.identifier) Lex.comma)
-        pure gens
-
-    ((_, end), fields) <-
-        Lex.braces $ P.sepBy parseField Lex.comma
-    pure
-        ( (start, end)
-        ,
-            [ HLIR.MkTopStructureDeclaration
-                { HLIR.header = HLIR.MkAnnotation idt generics
-                , HLIR.fields = fields
-                }
-            ]
-        )
-  where
-    parseField = do
-        (_, name) <- Lex.identifier
-        void Lex.colon
-        ty <- snd <$> Typ.parseType
-        pure (HLIR.MkStructField name ty)
 
 -- | PARSE EXTERNAL FUNCTION NODE
 -- | An external function node is a top-level construct that defines an
@@ -373,7 +352,7 @@ parseTopExternLet = do
 -- | TOP LEVEL PARSING
 -- | A top-level parser is a parser that parses top-level constructs in a
 -- | programming language. Top-level constructs are constructs that are not
--- | nested inside other constructs. For instance, in Bonzai, top-level
+-- | nested inside other constructs. For instance, in Reality, top-level
 -- | constructs are:
 -- | - Constant declarations
 -- | - Function declarations
@@ -392,12 +371,12 @@ parseTopFull =
     Lex.locateWith
         <$> P.choice
             [ parseTopConstantDeclaration
+            , parseTopLet
             , parseTopFunctionDeclaration
             , parseTopTypeAlias
             , parseTopImport
             , parseTopPublic
             , parseTopModuleDeclaration
-            , parseTopStructureDeclaration
             , P.try parseTopExternalFunction
             , parseTopExternLet
             , parseTopProperty
@@ -406,8 +385,8 @@ parseTopFull =
             , parseTopEnumeration
             ]
 
--- | Parse a complete Bonzai source file.
--- | A Bonzai source file is a sequence of top-level constructs.
+-- | Parse a complete Reality source file.
+-- | A Reality source file is a sequence of top-level constructs.
 -- | The parser will return a list of top-level nodes.
 parseProgram :: (MonadIO m) => P.Parser m [HLIR.HLIR "toplevel"]
 parseProgram = concat <$> P.many (snd <$> parseTopFull <* P.optional Lex.semi) <* P.eof

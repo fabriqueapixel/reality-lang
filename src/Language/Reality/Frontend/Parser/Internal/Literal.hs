@@ -64,7 +64,7 @@ parseString = MC.char '"' *> P.manyTill P.charLiteral (MC.char '"') <&> T.pack
 -- | - Int: An integer literal of the form 0, 1, 2, 3, etc.
 -- | - Float: A floating-point literal of the form 0.0, 1.0, 2.0, 3.0, etc.
 -- | - Char: A character literal of the form 'a', 'b', 'c', etc.
--- | - String: A string literal of the form "hello", "world", "bonzai", etc.
+-- | - String: A string literal of the form "hello", "world", "Reality", etc.
 -- | - Bool: A boolean literal of the form true or false.
 parseLiteral :: (MonadIO m) => P.Parser m HLIR.Literal
 parseLiteral =
