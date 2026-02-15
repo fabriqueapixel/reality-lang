@@ -114,3 +114,9 @@ char* get_env(const char* var) {
     return "";
   }
 }
+
+int32_t print_int(int32_t x) {
+    printf("%d\n", x);
+    return x;
+}
+
