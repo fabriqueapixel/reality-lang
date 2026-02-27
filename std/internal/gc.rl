@@ -32,8 +32,8 @@ mod GC {
         GC_malloc<*A>(sizeof(A))
     }
 
-    pub fn allocate<A>(value: A) -> *A {
-        let ptr = GC.malloc<A>();
+    pub fn allocate<A>(value: A, _ count: int = 1) -> *A {
+        let ptr = GC.calloc<A>(count);
         *ptr = value;
         ptr
     }
@@ -43,7 +43,7 @@ mod GC {
     }
 
     pub fn realloc<A>(ptr: *A, count: int) -> *A {
-        GC_realloc(ptr, count)
+        GC_realloc(ptr, count * sizeof(A))
     }
 
     pub fn free<A>(ptr: *A) -> unit {

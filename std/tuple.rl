@@ -2,7 +2,7 @@ import string;
 import std.internal.gc;
 
 enum Tuple<A, B> {
-    Pair(A, B)
+    Pair(x: A, y: B)
 }
 
 impl fn (t: Tuple<A, B>) show_prec<A, B>(prec: int) -> String {
@@ -33,7 +33,7 @@ impl fn (t: Tuple<A, B>) snd<A, B>() -> B {
     }
 }
 
-impl fn (t: Tuple<A, B>) map_first<A, B, C>(f: fn(A) -> C) -> Tuple<C, B> {
+impl fn (t: Tuple<A, B>) map_first<A, B, C>(f: fn(x: A) -> C) -> Tuple<C, B> {
     if t is Pair(let a, let b) {
         return Pair(f(a), b);
     } else {
@@ -41,7 +41,7 @@ impl fn (t: Tuple<A, B>) map_first<A, B, C>(f: fn(A) -> C) -> Tuple<C, B> {
     }
 }
 
-impl fn (t: Tuple<A, B>) map_second<A, B, C>(f: fn(B) -> C) -> Tuple<A, C> {
+impl fn (t: Tuple<A, B>) map_second<A, B, C>(f: fn(x: B) -> C) -> Tuple<A, C> {
     if t is Pair(let a, let b) {
         return Pair(a, f(b));
     } else {
@@ -49,7 +49,7 @@ impl fn (t: Tuple<A, B>) map_second<A, B, C>(f: fn(B) -> C) -> Tuple<A, C> {
     }
 }
 
-impl fn (t: Tuple<A, B>) map<A, B, C, D>(f: fn(A) -> C, g: fn(B) -> D) -> Tuple<C, D> {
+impl fn (t: Tuple<A, B>) map<A, B, C, D>(f: fn(x: A) -> C, g: fn(x: B) -> D) -> Tuple<C, D> {
     if t is Pair(let a, let b) {
         return Pair(f(a), g(b));
     } else {

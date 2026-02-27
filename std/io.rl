@@ -34,12 +34,12 @@ mod System {
     extern fn execute_command(command: string) -> int;
 
     mod Env {
-        fn get(var: String) -> Option<String> {
+        fn get(var: String, _ default: String = "") -> String {
             let value = get_env(var.data);
             if value != "".data {
-                return Some(String.init(value));
+                return String.init(value);
             } else {
-                return None;
+                return default;
             }
         }
 
@@ -56,15 +56,6 @@ mod System {
         fn exists(var: String) -> bool {
             let value = get_env(var.data);
             return value != "".data;
-        }
-
-        fn fetch(var: String, default: String) -> String {
-            let value = get_env(var.data);
-            if value != "".data {
-                return String.init(value);
-            } else {
-                return default;
-            }
         }
     }
 

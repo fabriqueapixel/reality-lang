@@ -86,7 +86,7 @@ impl fn (m: Map<K, V>) has_key<K, V>(key: K) -> bool {
     return false;
 }
 
-impl fn (m: *Map<K, V>) set_with<K, V>(key: K, f: fn(K, V) -> V, default: V) -> unit {
+impl fn (m: *Map<K, V>) set_with<K, V>(key: K, f: fn(key: K, value: V) -> V, default: V) -> unit {
     let i = 0;
     while i < m->length {
         if m->get_index(i) is Pair(let k, let v) && k == key {

@@ -5,7 +5,7 @@ type string = *char;
 extern fn malloc_string(s: string) -> string;
 #[intrinsic] {
     extern fn strcat(x: string, y: string) -> string;
-    extern fn puts(s: string) -> int;
+    extern fn printf(s: string) -> int;
     extern fn strlen(s: string) -> int;
 }
 extern fn concat_strings(a: string, b: string) -> string;
@@ -103,8 +103,8 @@ fn show<A>(x: A) -> String {
     show_prec(x, 0)
 }
 
-fn print<A>(x: A) -> int {
-    puts(show(x).data)
+fn print<A>(x: A, _ end: String = "\n") -> int {
+    printf((show(x) + end).data)
 }
 
 impl fn (x: String) equals(y: String) -> bool {
@@ -167,7 +167,7 @@ impl fn (x: String) repeat(n: int) -> String {
     result
 }
 
-impl fn (x: String) slice(start: int, end: int) -> String {
+impl fn (x: String) slice(_ start: int = 0, _ end: int = x.length) -> String {
     // for instance "hello".slice(1,4) = "ell"
     let length = if end > x.length { x.length } else { end };
     let result = "";
@@ -268,7 +268,7 @@ impl fn (x: String) replace(old: String, new_str: String) -> String {
     let i = 0;
 
     while i < x.length {
-        if x.slice(i, i + old.length).equals(old) {
+        if x.slice(start = i, end = i + old.length).equals(old) {
             result = result + new_str;
             i = i + old.length;
         } else {

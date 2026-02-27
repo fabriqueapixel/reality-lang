@@ -1,8 +1,8 @@
 import std.string;
 
 pub enum Error<Success, Failure> {
-    Ok(Success),
-    Err(Failure)
+    Ok(val: Success),
+    Err(err: Failure)
 }
 
 impl fn (self: Error<Success, Failure>) show_prec<Success, Failure>(prec: int) -> String {

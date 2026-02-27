@@ -52,7 +52,7 @@ mod List {
     impl fn (list: *List<A>) push<A>(value: A) -> *List<A> {
         if list->length == list->capacity {
             list->capacity = list->capacity + 10;
-            list->data = GC.realloc(list->data, list->capacity * sizeof(A));
+            list->data = GC.realloc(list->data, list->capacity);
         };
 
         *list->data.get_index_mut(list->length) = value;
@@ -61,7 +61,9 @@ mod List {
         list
     }
 
-    impl fn (list: List<A>) pop_at<A>(index: int) -> A {
+    impl fn (list: List<A>) pop<A>(_ at: int = list.length - 1) -> A {
+        let index = at;
+
         if index < 0 || index >= list.length {
             GC.panic("Index out of bounds in List.pop_at, "
                 + index.show()
@@ -84,7 +86,7 @@ mod List {
         value
     }
 
-    impl fn (list: List<A>) map<A, B>(f: fn(A) -> B) -> List<B> {
+    impl fn (list: List<A>) map<A, B>(f: fn(x: A) -> B) -> List<B> {
         let init_list = &List.init<B>();
 
         let i = 0;
@@ -181,7 +183,7 @@ mod List {
         result
     }
 
-    impl fn (list: List<A>) slice<A>(start: int, end: int) -> List<A> {
+    impl fn (list: List<A>) slice<A>(_ start: int = 0, _ end: int = list.length) -> List<A> {
         let init_list = new List.init<A>();
 
         let i = start;
@@ -212,38 +214,7 @@ mod List {
         return true;
     }
 
-    impl fn (list: *List<A>) pop<A>() -> Option<A> {
-        if list->length == 0 {
-            return None;
-        };
-
-        list->length = list->length - 1;
-        let value = (list->data)[list->length];
-
-        Some(value)
-    }
-
-    /// Removes and returns the first element of the list, if it exists.
-    impl fn (list: *List<A>) pop_front<A>() -> Option<A> {
-        if list->length == 0 {
-            return None;
-        };
-
-        let value = (list->data)[0];
-
-        let i = 1;
-        while i < list->length {
-            let current_value = (list->data)[i];
-            *(list->data).get_index_mut(i - 1) = current_value;
-            i = i + 1;
-        };
-
-        list->length = list->length - 1;
-
-        Some(value)
-    }
-
-    impl fn (list: List<A>) filter_map<A, B>(f: fn(A) -> Option<B>) -> List<B> {
+    impl fn (list: List<A>) filter_map<A, B>(f: fn(x: A) -> Option<B>) -> List<B> {
         let init_list = new List.init<B>();
 
         let i = 0;
@@ -260,7 +231,7 @@ mod List {
         *init_list
     }
 
-    impl fn (list: List<A>) filter<A>(f: fn(A) -> bool) -> List<A> {
+    impl fn (list: List<A>) filter<A>(f: fn(x: A) -> bool) -> List<A> {
         let init_list = new List.init<A>();
 
         let i = 0;
@@ -292,7 +263,7 @@ mod List {
         return true;
     }
 
-    impl fn (c: List<A>) take_while<A>(predicate: fn(A) -> bool) -> List<A> {
+    impl fn (c: List<A>) take_while<A>(predicate: fn(x: A) -> bool) -> List<A> {
         let result = new List.init<A>();
 
         let i = 0;
@@ -309,7 +280,7 @@ mod List {
         return *result;
     }
 
-    impl fn (c: List<A>) drop_while<A>(predicate: fn(A) -> bool) -> List<A> {
+    impl fn (c: List<A>) drop_while<A>(predicate: fn(x: A) -> bool) -> List<A> {
         let result = new List.init<A>();
 
         let i = 0;
@@ -351,7 +322,7 @@ mod List {
         return *result;
     }
 
-    impl fn (c: List<A>) partition<A>(predicate: fn(A) -> bool) -> Tuple<List<A>, List<A>> {
+    impl fn (c: List<A>) partition<A>(predicate: fn(x: A) -> bool) -> Tuple<List<A>, List<A>> {
         let trueList = &List.init<A>();
         let falseList = &List.init<A>();
 
@@ -393,7 +364,7 @@ mod String {
     }
 }
 
-impl fn (x: List<String>) join(separator: String) -> String {
+impl fn (x: List<String>) join(_ separator: String = "") -> String {
     if x.length == 0 {
         return "";
     };
