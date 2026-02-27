@@ -42,7 +42,7 @@ data Type
     | MkTyQuantified Text
     | MkTyRecord Type
     | MkTyRowEmpty
-    | MkTyRowExtend Text Type Type
+    | MkTyRowExtend Text Type Bool Type
     deriving (Ord, Generic)
 
 -- | ORD INSTANCE FOR TYPE
@@ -86,7 +86,7 @@ instance Eq Type where
     MkTyQuantified a == MkTyQuantified b = a == b
     MkTyRecord a == MkTyRecord b = a == b
     MkTyRowEmpty == MkTyRowEmpty = True
-    MkTyRowExtend a1 b1 c1 == MkTyRowExtend a2 b2 c2 = a1 == a2 && b1 == b2 && c1 == c2
+    MkTyRowExtend a1 b1 opt c1 == MkTyRowExtend a2 b2 opt' c2 = a1 == a2 && b1 == b2 && c1 == c2 && opt == opt'
     _ == _ = False
 
 -- | FUNCTION TYPE
@@ -155,8 +155,8 @@ instance ToText Type where
     toText (MkTyQuantified a) = "'" <> a
     toText (MkTyRecord t) = T.concat ["{ ", toText t, " }"]
     toText MkTyRowEmpty = "empty"
-    toText (MkTyRowExtend label fieldType rest) =
-        T.concat [label, ": ", toText fieldType, " | ", toText rest]
+    toText (MkTyRowExtend label fieldType opt rest) =
+        T.concat [label, if opt then "?" else "", ": ", toText fieldType, " | ", toText rest]
 
 sanitizeRecord :: MonadIO m => Type -> m Type
 sanitizeRecord (MkTyRecord t) = do
@@ -165,14 +165,14 @@ sanitizeRecord (MkTyRecord t) = do
     case t' of
         MkTyRecord rec' -> pure $ MkTyRecord rec'
         _ -> pure $ MkTyRecord t'
-sanitizeRecord (MkTyRowExtend label fieldType rest) = do
+sanitizeRecord (MkTyRowExtend label fieldType opt rest) = do
     fieldType' <- sanitizeRecord fieldType
     rest' <- sanitizeRecord rest
     case rest' of
         MkTyRecord t -> do
             t' <- sanitizeRecord t
-            pure $ MkTyRecord (MkTyRowExtend label fieldType' t')
-        _ -> pure $ MkTyRowExtend label fieldType' rest'
+            pure $ MkTyRecord (MkTyRowExtend label fieldType' opt t')
+        _ -> pure $ MkTyRowExtend label fieldType' opt rest'
 sanitizeRecord t = pure t
 
 prettify :: MonadIO m => Type -> m Text
@@ -204,10 +204,10 @@ prettify ty = do
 
         MkTyRowEmpty -> pure "row_empty"
 
-        MkTyRowExtend label fieldType rest -> do
+        MkTyRowExtend label fieldType opt rest -> do
             fieldTypeText <- prettify fieldType
             restText <- prettify rest
-            pure $ T.concat [label, "_of_", fieldTypeText, "_and_", restText]
+            pure $ T.concat [label, if opt then "?" else "", "_of_", fieldTypeText, "_and_", restText]
 
 -- | TYPE SIMPLIFICATION
 -- | Given a type, simplify it by following the links of type variables until
@@ -232,10 +232,10 @@ simplify (MkTyRecord t) = do
     t' <- simplify t
     pure $ MkTyRecord t'
 simplify MkTyRowEmpty = pure MkTyRowEmpty
-simplify (MkTyRowExtend label fieldType rest) = do
+simplify (MkTyRowExtend label fieldType opt rest) = do
     fieldType' <- simplify fieldType
     rest' <- simplify rest
-    pure $ MkTyRowExtend label fieldType' rest'
+    pure $ MkTyRowExtend label fieldType' opt rest'
 simplify a = pure a
 
 instance ToText TyVar where

@@ -191,7 +191,7 @@ data StructureMember t
 pattern MkExprBinary ::
     Text -> Expression Maybe t -> Expression Maybe t -> Expression Maybe t
 pattern MkExprBinary op a b =
-    MkExprApplication (MkExprVariable (MkAnnotation op Nothing) []) [a, b] Nothing
+    MkExprApplication (MkExprVariable (MkAnnotation op Nothing) []) [a, b, MkExprStructureEmpty] Nothing
 
 pattern MkExprWhileIs ::
     Expression Maybe t ->
