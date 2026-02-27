@@ -100,9 +100,8 @@ codegenToplevel (MLIR.MkTopPublic n) = do
 codegenToplevel (MLIR.MkTopStructure name fields) = do
     modifyIORef' userDefinedTypes (Set.insert (varify name))
     fieldLines <- mapM codegenField fields
-    let structHeader = Text.concat ["struct ", varify name, " {"]
-    let structFooter = Text.concat ["};"]
-    pure $ Text.unlines ([structHeader] ++ fieldLines ++ [structFooter])
+    modifyIORef' typedefs (<> [Text.concat ["struct ", varify name, " { ", Text.intercalate " " fieldLines, " };"]])
+    pure ""
 codegenToplevel (MLIR.MkTopExternalFunction name generics params ret) = do
     paramList <-
         Text.intercalate ", "
@@ -308,7 +307,7 @@ codegenType _ _ def _ (MLIR.MkTyId n) = do
 
     userTypes <- readIORef userDefinedTypes
 
-    when (typeName `Set.member` userTypes && typedef `notElem` typedefs') $ do
+    when (typeName `Set.member` userTypes || typedef `notElem` typedefs') $ do
         modifyIORef' typedefs (<> [typedef])
 
     pure
@@ -400,10 +399,10 @@ codegenType _ _ _ _ t@(MLIR.MkTyApp _ _) =
     Err.compilerError
         $ "Type applications are not directly supported in C codegen: "
             <> Text.pack (show t)
-codegenType shouldPutEnv ext _ generics (MLIR.MkTyRowExtend field ty rest) = do
+codegenType shouldPutEnv ext _ generics (MLIR.MkTyRowExtend field ty _ rest) = do
     fieldTy <- codegenType shouldPutEnv ext Nothing generics ty
     restTy <- codegenType shouldPutEnv ext Nothing generics rest
-    let structDef = Text.concat [fieldTy, " ", field, "; ", restTy]
+    let structDef = Text.concat [fieldTy, " ", varify field, "; ", restTy]
     pure structDef
 codegenType _ _ _ _ MLIR.MkTyRowEmpty = pure ""
 
@@ -511,11 +510,11 @@ removeDuplicateFields :: MLIR.Type -> MLIR.Type
 removeDuplicateFields (MLIR.MkTyRecord r) =
     let (fields, rest) = getAllFields r
      in HLIR.MkTyRecord (buildTypeWithRest (Map.toList fields) (removeDuplicateFields rest))
-removeDuplicateFields (MLIR.MkTyRowExtend label ty rest) =
-    HLIR.MkTyRowExtend label (removeDuplicateFields ty) (removeDuplicateFields rest)
+removeDuplicateFields (MLIR.MkTyRowExtend label ty isOpt rest) =
+    HLIR.MkTyRowExtend label (removeDuplicateFields ty) isOpt (removeDuplicateFields rest)
 removeDuplicateFields t = t
 
 buildTypeWithRest :: [(Text, MLIR.Type)] -> MLIR.Type -> MLIR.Type
 buildTypeWithRest [] rest = rest
 buildTypeWithRest ((label, fieldType) : xs) rest =
-    HLIR.MkTyRowExtend label fieldType (buildTypeWithRest xs rest)
+    HLIR.MkTyRowExtend label fieldType False (buildTypeWithRest xs rest)
