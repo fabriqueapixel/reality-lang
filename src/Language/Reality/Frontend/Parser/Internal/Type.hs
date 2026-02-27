@@ -5,9 +5,10 @@ import Language.Reality.Frontend.Parser qualified as P
 import Language.Reality.Frontend.Parser.Lexer qualified as Lex
 import Language.Reality.Syntax.HLIR qualified as HLIR
 import qualified Data.List as List
+import qualified Data.Either as List
 
 data TypeField
-    = Field Text HLIR.Type
+    = Field Text HLIR.Type Bool
     | Rest HLIR.Type
     deriving (Show, Eq)
 
@@ -15,11 +16,27 @@ parseTypeField :: (MonadIO m) => P.Parser m TypeField
 parseTypeField = P.choice [
         do
             ((_, _), fieldName) <- Lex.identifier
+            isOpt <- P.option False (Lex.symbol "?" $> True)
             void $ Lex.symbol ":"
-            Field fieldName . snd <$> parseType,
+            Field fieldName . snd <$> parseType <*> pure isOpt,
 
         Rest . snd <$> (Lex.symbol ".." *> parseType)
     ]
+
+parseArgument :: (MonadIO m) => P.Parser m (Text, HLIR.Type)
+parseArgument = do
+    ((_, _), argName) <- Lex.identifier
+    void $ Lex.symbol ":"
+    argType <- snd <$> parseType
+    pure (argName, argType)
+
+parseNamedArgument :: (MonadIO m) => P.Parser m (Text, HLIR.Type)
+parseNamedArgument = do
+    void $ Lex.symbol "_"
+    ((_, _), argName) <- Lex.identifier
+    void $ Lex.symbol ":"
+    argType <- snd <$> parseType
+    pure (argName, argType)
 
 -- | TYPE
 -- | Parse a type.
@@ -32,10 +49,15 @@ parseType =
           -- "fn" "(" type ("," type)* ")" "->" type
           do
             ((start, _), _) <- Lex.reserved "fn"
-            tys <- snd <$> Lex.parens (P.sepBy (snd <$> parseType) Lex.comma)
+            tys <- snd <$> Lex.parens (P.sepBy (P.try (Left <$> parseArgument) <|> (Right <$> parseNamedArgument)) Lex.comma)
+            
+            let (argTypes, namedArgTypes) = List.partitionEithers tys
+
             ((_, end), ret) <- Lex.symbol "->" *> parseType
 
-            pure ((start, end), tys HLIR.:->: ret)
+            let kwargsType = List.foldl' (\acc (argName, argType) -> HLIR.MkTyRowExtend argName argType False acc) HLIR.MkTyRowEmpty namedArgTypes
+
+            pure ((start, end), (map snd argTypes <> [HLIR.MkTyRecord kwargsType]) HLIR.:->: ret)
         , -- Record type constructor
           -- Defined as the following:
           --
@@ -56,10 +78,10 @@ parseType =
                 _ -> fail "Unreachable due to previous check"
 
             fields'' <- forM fields' $ \case
-                Field name ty -> pure (name, ty)
+                Field name ty isOpt -> pure (name, ty, isOpt)
                 Rest _ -> fail "Unreachable due to previous check"
 
-            let recordType = List.foldl (\acc (fieldName, fieldType) -> HLIR.MkTyRowExtend fieldName fieldType acc) restType fields''
+            let recordType = List.foldl (\acc (fieldName, fieldType, isOpt) -> HLIR.MkTyRowExtend fieldName fieldType isOpt acc) restType fields''
 
             pure ((start, end), HLIR.MkTyRecord recordType)
         , -- Pointer type constructor

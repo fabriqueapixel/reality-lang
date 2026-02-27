@@ -13,6 +13,8 @@ import qualified GHC.IO as IO
 import qualified Data.Text as Text
 import qualified Text.Megaparsec.Char as P
 import qualified Text.Printf as Text
+import qualified Control.Monad.Result as Err
+import qualified Data.Set as Set
 
 {-# NOINLINE lambdaArgumentCounter #-}
 lambdaArgumentCounter :: IORef Int
@@ -133,11 +135,11 @@ parseInterpolatedString = do
              )
 
     showPrecE (_, expr) =
-        HLIR.MkExprFunctionAccess "show_prec" expr [] [ HLIR.MkExprLiteral (HLIR.MkLitInt 0) ]
+        HLIR.MkExprFunctionAccess "show_prec" expr [] [ HLIR.MkExprLiteral (HLIR.MkLitInt 0), HLIR.MkExprStructureEmpty ]
 
     combine (p1, e1) (p2, e2) =
         ( (fst p1, snd p2)
-        , HLIR.MkExprFunctionAccess "add" e1 [] [e2]
+        , HLIR.MkExprFunctionAccess "add" e1 [] [e2, HLIR.MkExprStructureEmpty]
         )
 
 -- | STRING INIT
@@ -145,7 +147,8 @@ parseInterpolatedString = do
 stringInit :: Text -> HLIR.HLIR "expression"
 stringInit str =
     HLIR.MkExprVarCall "String.init" [
-        HLIR.MkExprLiteral (HLIR.MkLitString str)
+      HLIR.MkExprLiteral (HLIR.MkLitString str)
+    , HLIR.MkExprStructureEmpty
     ]
 
 -- | PARSE LITERAL
@@ -166,7 +169,7 @@ parseExprLiteral =
             <|> (HLIR.MkExprLiteral . HLIR.MkLitString <$> Lit.parseString)
 
         let lit' = case lit of
-                    HLIR.MkExprLiteral (HLIR.MkLitString _) -> HLIR.MkExprVarCall "String.init" [lit]
+                    HLIR.MkExprLiteral (HLIR.MkLitString _) -> HLIR.MkExprVarCall "String.init" [lit, HLIR.MkExprStructureEmpty]
                     _ -> lit
 
         pure lit'
@@ -202,7 +205,7 @@ parseExprNew = do
     ((start, _), _) <- Lex.reserved "new"
     ((_, end), expr) <- parseExprFull
 
-    pure ((start, end), HLIR.MkExprVarCall "GC.allocate" [expr])
+    pure ((start, end), HLIR.MkExprVarCall "GC.allocate" [expr, HLIR.MkExprStructureEmpty])
 
 -- | PARSE VARIABLE
 -- | Parse a variable expression. A variable expression is an expression that
@@ -291,9 +294,40 @@ parseExprBlock = do
 panic :: HLIR.Expression Maybe t
 panic = HLIR.MkExprVarCall "GC.panic" [
         HLIR.MkExprVarCall "String.init" [
-            HLIR.MkExprLiteral (HLIR.MkLitString "Unreachable code executed")
-        ]
+            HLIR.MkExprLiteral (HLIR.MkLitString "Unreachable code executed"),
+            HLIR.MkExprStructureEmpty
+        ],
+        HLIR.MkExprStructureEmpty
     ]
+
+data LambdaArgument 
+    = LamArgAnnot (HLIR.Annotation (Maybe HLIR.Type))
+    | LamArgPattern (HLIR.HLIR "pattern")
+    | LamArgNamed Text (Maybe HLIR.Type) (Maybe (HLIR.HLIR "expression"))
+
+parseLambdaArguments :: MonadIO m => P.Parser m [LambdaArgument]
+parseLambdaArguments = do
+    P.sepBy parseArg Lex.comma
+    where
+        parseArg :: MonadIO m => P.Parser m LambdaArgument
+        parseArg = 
+            P.choice [
+                P.try $ LamArgAnnot <$> parseAnnotation (snd <$> Typ.parseType)
+                , P.try $ do
+                    pat <- snd <$> parsePatternFull
+                    pure $ LamArgPattern pat
+                , P.try $ do
+                    void $ Lex.symbol "_"
+                    name <- snd <$> Lex.identifier
+                    ty <- P.optional (Lex.symbol ":" *> (snd <$> Typ.parseType))
+                    val <- P.optional $ do
+                        void $ Lex.symbol "="
+                        snd <$> parseExprFull
+                    pure $ LamArgNamed name ty val  
+                ]
+
+someE :: HLIR.HLIR "expression" -> HLIR.HLIR "expression"
+someE e = HLIR.MkExprVarCall "Some" [e, HLIR.MkExprStructureEmpty]
 
 -- | PARSE LAMBDA EXPRESSION
 -- | Parse a lambda expression. A lambda expression is an expression that consists
@@ -306,24 +340,33 @@ parseExprLambda ::
 parseExprLambda = do
     ((start, _), _) <- Lex.symbol "|"
 
-    params <- P.sepBy
-        (Left <$> parseAnnotation (snd <$> Typ.parseType)
-            <|> (Right . snd <$> parsePatternFull)
-        )
-        Lex.comma
+    params <- parseLambdaArguments
 
     void $ Lex.symbol "|"
 
-    (args, patterns) <- foldlM
-        (\(accArgs, accPats) param -> case param of
-            Left ann -> pure (accArgs ++ [ann], accPats)
-            Right pat -> do
+    (preArgs, patterns, kwargs, kwargsType, otherKwargs) <- foldlM
+        (\(accArgs, accPats, accM, accT, accOtherKwargs) param -> case param of
+            LamArgAnnot ann -> pure (accArgs ++ [ann], accPats, accM, accT, accOtherKwargs)
+            LamArgPattern pat -> do
                 symbol <- freshSymbol
                 let ann = HLIR.MkAnnotation symbol Nothing
-                pure (accArgs ++ [ann], accPats ++ [(pat, ann)])
+                pure (accArgs ++ [ann], accPats ++ [(pat, ann)], accM, accT, accOtherKwargs)
+            LamArgNamed name ty val -> do
+                let newT 
+                        | Just ty' <- ty = HLIR.MkTyRowExtend name ty' True accT
+                        | otherwise = accT
+                let newM 
+                        | Just v <- val = Map.insert name v accM
+                        | otherwise = Map.insert name (HLIR.MkExprVariable (HLIR.MkAnnotation name Nothing) []) accM
+                let newOtherKwargs = case val of
+                        Just _ -> accOtherKwargs
+                        Nothing -> Set.insert name accOtherKwargs
+                pure (accArgs ++ [HLIR.MkAnnotation name ty], accPats, newM, newT, newOtherKwargs)
         )
-        ([], [])
+        ([], [], Map.empty, HLIR.MkTyRowEmpty, Set.empty)
         params
+
+    let args = preArgs <> [HLIR.MkAnnotation "kwargs" (Just (HLIR.MkTyRecord kwargsType))]
 
     returnType <- P.optional $ Lex.symbol "->" *> (snd <$> Typ.parseType)
 
@@ -331,7 +374,23 @@ parseExprLambda = do
         Just _ -> parseExprBlock
         Nothing -> parseExprFull
 
-    let body' = foldr
+    let bodyWithOther = Set.foldl (\acc name -> HLIR.MkExprLetIn
+                (HLIR.MkAnnotation name Nothing)
+                (HLIR.MkExprFunctionAccess "unwrap" (HLIR.MkExprStructureAccess (HLIR.MkExprVariable (HLIR.MkAnnotation "kwargs" Nothing) []) name) [] [HLIR.MkExprStructureEmpty])
+                acc
+                Nothing
+            ) bodyWithDefaults otherKwargs
+        
+        bodyWithDefaults = Map.foldrWithKey
+            (\name val acc -> HLIR.MkExprLetIn
+                (HLIR.MkAnnotation name Nothing)
+                (HLIR.MkExprFunctionAccess "get_or_else" (HLIR.MkExprStructureAccess (HLIR.MkExprVariable (HLIR.MkAnnotation "kwargs" Nothing) []) name) [] [val, HLIR.MkExprStructureEmpty])
+                acc
+                Nothing
+            )
+            body
+            kwargs
+        body' = foldr
             (\(pat, ann) acc ->
                 HLIR.MkExprSingleIf
                     (HLIR.MkExprIs
@@ -342,7 +401,7 @@ parseExprLambda = do
                     acc
                     Nothing
             )
-            body
+            bodyWithOther
             patterns
 
     pure ((start, end), HLIR.MkExprLambda args returnType body')
@@ -353,7 +412,7 @@ parseExprList = do
 
     idx <- freshSymbol
 
-    let newList  = HLIR.MkExprVarCall "List.init" []
+    let newList  = HLIR.MkExprVarCall "List.init" [HLIR.MkExprStructureEmpty]
 
         letRefIn = HLIR.MkExprLetIn
                     (HLIR.MkAnnotation (idx <> "_list_ref") Nothing)
@@ -560,6 +619,11 @@ makeOperator op ((start, _), a) ((_, end), b) =
         b
     )
 
+data Argument
+    = ArgExpr (HLIR.HLIR "expression")
+    | ArgNamed Text (HLIR.HLIR "expression")
+    deriving (Eq)
+
 -- | PARSE FULL EXPRESSION
 -- | Parse a full expression. A full expression is an expression that can contain
 -- | operators and function calls. It is used to represent complex expressions in
@@ -591,19 +655,49 @@ parseExprFull ::
     (MonadIO m) => P.Parser m (HLIR.Position, HLIR.HLIR "expression")
 parseExprFull = Lex.locateWith <$> P.makeExprParser parseExprTerm operators
   where
+    parseExprArg :: (MonadIO m) => P.Parser m Argument
+    parseExprArg = do
+        P.choice [
+              P.try $ do
+                  name <- snd <$> Lex.identifier
+                  void $ Lex.symbol "="
+                  value <- snd <$> parseExprFull
+                  pure $ ArgNamed name value
+            , ArgExpr . snd <$> parseExprFull
+            ]
+
+    parseExprArgs :: (MonadIO m) => P.Parser m (HLIR.Position, [HLIR.HLIR "expression"])
+    parseExprArgs = do
+        (pos, args) <- Lex.parens $ P.sepBy parseExprArg Lex.comma
+
+        block <- P.try $ P.optional (snd <$> (P.try parseExprLambda <|> parseExprBlock))
+
+        let (exprArgs, namedArgs) = List.partition (\case
+                    ArgExpr _ -> True
+                    ArgNamed _ _ -> False
+                ) args
+
+        pure (pos, map (\case
+                ArgExpr e -> e
+                ArgNamed _ _ -> Err.compilerError "Named argument should not be in expression arguments"
+            ) exprArgs <> maybeToList block <> [
+                List.foldl' (\acc -> \case
+                    ArgNamed n e -> HLIR.MkExprStructureCreation n (someE e) acc Nothing Nothing
+                    ArgExpr _ -> Err.compilerError "Simple expression argument should not be there"
+                ) HLIR.MkExprStructureEmpty namedArgs
+            ])
+
     operators =
         [
             [ P.Postfix . Lex.makeUnaryOp $ do
                 void $ Lex.symbol "["
                 index <- snd <$> parseExprFull
                 ((_, end), _) <- Lex.symbol "]"
-                pure $ \(start, arr) -> ((fst start, end), HLIR.MkExprFunctionAccess "get_index" arr [] [index])
+                pure $ \(start, arr) -> ((fst start, end), HLIR.MkExprFunctionAccess "get_index" arr [] [index, HLIR.MkExprStructureEmpty])
             ]
         ,
             [ P.Postfix . Lex.makeUnaryOp $ do
-                ((_, end), args) <-
-                    Lex.parens
-                        (P.sepBy (snd <$> parseExprFull) Lex.comma)
+                ((_, end), args) <- parseExprArgs
                 pure $ \((start, _), e) -> ((start, end), HLIR.MkExprApplication e args Nothing)
             ]
         ,
@@ -613,8 +707,7 @@ parseExprFull = Lex.locateWith <$> P.makeExprParser parseExprTerm operators
 
                 types <- P.option [] . P.try $ snd <$> Lex.angles ((snd <$> Typ.parseType) `P.sepBy1` Lex.comma)
 
-                optArgs <- P.optional $ Lex.parens (P.sepBy (snd <$> parseExprFull) Lex.comma)
-
+                optArgs <- P.optional parseExprArgs
 
                 pure $ \((start, _), e) -> do
                     let e' = case sym of
@@ -791,9 +884,9 @@ parseStmtForIn = do
         ( (start, end)
         , HLIR.MkExprLetIn
             iterableVar
-            (HLIR.MkExprFunctionAccess "iter" iterable [] [])
+            (HLIR.MkExprFunctionAccess "iter" iterable [] [HLIR.MkExprStructureEmpty])
             ( HLIR.MkExprWhileIs
-            (HLIR.MkExprFunctionAccess "next" (HLIR.MkExprVariable iterableVar []) [] [])
+            (HLIR.MkExprFunctionAccess "next" (HLIR.MkExprVariable iterableVar []) [] [HLIR.MkExprStructureEmpty])
             (HLIR.MkPatternConstructor "Some" [HLIR.MkPatternLet (HLIR.MkAnnotation (snd pattern) Nothing)] Nothing)
             body
             (HLIR.MkExprVariable (HLIR.MkAnnotation "unit" Nothing) []) )
