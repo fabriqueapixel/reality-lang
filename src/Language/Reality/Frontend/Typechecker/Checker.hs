@@ -78,7 +78,7 @@ runTypechecker toplevels = do
 
         _ -> pure xs
 isArgsAnnotation :: [HLIR.Annotation HLIR.Type] -> Bool
-isArgsAnnotation [x] | x.name == "args" && x.typeValue == HLIR.MkTyList (HLIR.MkTyId "String") = True
+isArgsAnnotation (x:_) | x.name == "args" && x.typeValue == HLIR.MkTyList (HLIR.MkTyId "String") = True
 isArgsAnnotation _ = False
 
 getAllFunctionSignatures
@@ -215,7 +215,7 @@ checkToplevelSingular (HLIR.MkTopFunctionDeclaration ann params ret body) = with
                             (HLIR.MkAnnotation "getArgs" (Just getArgsType))
                             []
                         )
-                        [argc, argv]
+                        [argc, argv, HLIR.MkExprStructureEmpty]
                         (Just argListType)
                     )
                     body
@@ -621,7 +621,7 @@ synthesizeE (HLIR.MkExprApplication callee args _) = do
         HLIR.MkTyFun paramTypes retType -> do
             -- If the callee is a function type, we check that the number of
             -- arguments matches the number of parameters.
-            if length paramTypes /= length args
+            if length paramTypes - length args > 1
                 then M.throw (M.InvalidArgumentQuantity (length paramTypes) (length args))
                 else do
                     -- Checking each argument against the corresponding parameter type
@@ -635,7 +635,7 @@ synthesizeE (HLIR.MkExprApplication callee args _) = do
                         )
                         ([], [], mempty)
                         (zip paramTypes args)
-
+    
                     -- Collecting all constraints
                     let cs = cs1 <> cs2
 
@@ -674,7 +674,7 @@ synthesizeE (HLIR.MkExprStructureCreation field value record _ _) = do
     a <- M.newType
     r <- M.newType
 
-    let funTy = [a, HLIR.MkTyRecord r] HLIR.:->: HLIR.MkTyRecord (HLIR.MkTyRowExtend field a r)
+    let funTy = [a, HLIR.MkTyRecord r] HLIR.:->: HLIR.MkTyRecord (HLIR.MkTyRowExtend field a False r)
 
     ret <- M.newType
 
@@ -687,7 +687,7 @@ synthesizeE (HLIR.MkExprStructureAccess struct field) = do
     a <- M.newType
     r <- M.newType
 
-    let funTy = [HLIR.MkTyRecord (HLIR.MkTyRowExtend field a r)] HLIR.:->: a
+    let funTy = [HLIR.MkTyRecord (HLIR.MkTyRowExtend field a False r)] HLIR.:->: a
 
     ret <- M.newType
 
@@ -986,7 +986,7 @@ checkP expected (HLIR.MkPatternLet (HLIR.MkAnnotation name _)) = do
 
 getAllFields :: Monad m =>HLIR.Type -> m (Map Text HLIR.Type, HLIR.Type)
 getAllFields (HLIR.MkTyRecord t) = getAllFields t
-getAllFields (HLIR.MkTyRowExtend field fieldType rest) = do
+getAllFields (HLIR.MkTyRowExtend field fieldType _ rest) = do
     (fields, row) <- getAllFields rest
     pure (Map.insert field fieldType fields, row)
 getAllFields t = pure (mempty, t)
@@ -1057,6 +1057,47 @@ checkE (argTypes HLIR.:->: retType) (HLIR.MkExprLambda args retType' body) = do
         , cs
         , mempty
         )
+checkE (HLIR.MkTyRecord expected) (HLIR.MkExprStructureCreation field value record _ _) = do
+    (vTy, rTy, _) <- M.rewriteRow True True expected field
+
+    (v', cs1, bs1) <- checkE vTy value
+    (e', cs2, bs2) <- checkE (HLIR.MkTyRecord rTy) record
+    
+    pure (HLIR.MkExprStructureCreation field v' e' (Identity vTy) (Identity (HLIR.MkTyRecord expected)), cs1 <> cs2, bs1 <> bs2)
+checkE expected HLIR.MkExprStructureEmpty = do
+    let buildMap :: HLIR.Type -> Map Text HLIR.Type -> Map Text HLIR.Type
+        buildMap (HLIR.MkTyRecord r) acc = buildMap r acc
+        buildMap (HLIR.MkTyRowExtend field fieldType _ rest) acc =
+            buildMap rest (Map.insert field fieldType acc)
+        buildMap _ acc = acc
+
+        isOption :: MonadIO m => HLIR.Type -> m Bool
+        isOption (HLIR.MkTyApp (HLIR.MkTyId "Option") _) = pure True
+        isOption (HLIR.MkTyVar v) = do
+            tvr <- readIORef v
+            case tvr of
+                HLIR.Link ty -> isOption ty
+                _ -> pure False
+        isOption _ = pure False
+
+    let expectedFields = buildMap expected mempty
+    
+    reconstructedMap <- foldlM
+            (\acc (field, fieldType) -> do
+                opt <- isOption fieldType
+                if opt
+                    then do
+                        let noneE = HLIR.MkExprVariable (HLIR.MkAnnotation "None" (Identity fieldType)) []
+
+                        let recE = HLIR.MkExprStructureCreation field noneE acc (Identity fieldType) (Identity (HLIR.MkTyRecord expected))
+
+                        pure recE
+                    else M.throw (M.RewriteRowError expected field)
+            ) 
+            HLIR.MkExprStructureEmpty
+            (Map.toList expectedFields)
+
+    pure (reconstructedMap, mempty, mempty)
 checkE expected (HLIR.MkExprLocated p e) = do
     HLIR.pushPosition p
 

@@ -8,7 +8,6 @@ import Language.Reality.Frontend.Parser.Internal.Type qualified as Typ
 import Language.Reality.Frontend.Parser.Lexer qualified as Lex
 import Language.Reality.Syntax.HLIR qualified as HLIR
 import Text.Megaparsec.Char qualified as P
-import Control.Color (printText)
 import qualified Data.Set as Set
 
 -- | PARSE CONSTANT DECLARATION NODE

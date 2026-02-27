@@ -224,7 +224,7 @@ applySubstitution s (HLIR.MkTyRecord t) = do
     t' <- applySubstitution s t
     pure $ HLIR.MkTyRecord t'   
 applySubstitution _ HLIR.MkTyRowEmpty = pure HLIR.MkTyRowEmpty
-applySubstitution s (HLIR.MkTyRowExtend label fieldType rest) = do
+applySubstitution s (HLIR.MkTyRowExtend label fieldType opt rest) = do
     fieldType' <- applySubstitution s fieldType
     rest' <- applySubstitution s rest
-    pure $ HLIR.MkTyRowExtend label fieldType' rest'
+    pure $ HLIR.MkTyRowExtend label fieldType' opt rest'

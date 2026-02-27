@@ -71,10 +71,10 @@ removeAliases (HLIR.MkTyRecord t) = do
     t' <- removeAliases t
     pure (HLIR.MkTyRecord t')
 removeAliases HLIR.MkTyRowEmpty = pure HLIR.MkTyRowEmpty
-removeAliases (HLIR.MkTyRowExtend label fieldType rest) = do
+removeAliases (HLIR.MkTyRowExtend label fieldType opt rest) = do
     fieldType' <- removeAliases fieldType
     rest' <- removeAliases rest
-    pure (HLIR.MkTyRowExtend label fieldType' rest')
+    pure (HLIR.MkTyRowExtend label fieldType' opt rest')
 removeAliases (HLIR.MkTyApp base args) =
     HLIR.MkTyApp <$> removeAliases base <*> mapM removeAliases args
 
@@ -162,8 +162,8 @@ applySubtypeRelation _ (HLIR.MkTyId name1) (HLIR.MkTyId name2)
 applySubtypeRelation _ (HLIR.MkTyQuantified name1) (HLIR.MkTyQuantified name2)
     | name1 == name2 = pure Map.empty
 applySubtypeRelation _ HLIR.MkTyRowEmpty HLIR.MkTyRowEmpty = pure Map.empty
-applySubtypeRelation shouldMutate (HLIR.MkTyRowExtend label1 fieldTy1 rowTail1) row2 = do
-    (fieldTy2, rowTail2, s1) <- rewriteRow shouldMutate row2 label1
+applySubtypeRelation shouldMutate (HLIR.MkTyRowExtend label1 fieldTy1 opt1 rowTail1) row2 = do
+    (fieldTy2, rowTail2, s1) <- rewriteRow shouldMutate opt1 row2 label1
     -- ^ apply side-condition to ensure termination
     case snd $ toList' rowTail1 of
         Just tv -> do
@@ -196,6 +196,8 @@ applySubtypeRelation shouldMutate (HLIR.MkTyRowExtend label1 fieldTy1 rowTail1) 
             s3 <- applySubtypeRelation shouldMutate rowTail1' rowTail2'
 
             composeSubstitutions [s3, sc]
+applySubtypeRelation shouldMutate HLIR.MkTyRowEmpty (HLIR.MkTyRowExtend _ _ opt rowTail) | opt = do
+    applySubtypeRelation shouldMutate HLIR.MkTyRowEmpty rowTail
 applySubtypeRelation shouldMutate (HLIR.MkTyRecord t1) (HLIR.MkTyRecord t2) = applySubtypeRelation shouldMutate t1 t2
 applySubtypeRelation _ t1 t2 | t1 /= t2 = M.throw (M.UnificationFail t1 t2)
 applySubtypeRelation _ _ _ = pure Map.empty
@@ -204,7 +206,7 @@ applySubtypeRelation _ _ _ = pure Map.empty
 toList' :: HLIR.Type -> ([(Text, HLIR.Type)], Maybe (IORef HLIR.TyVar))
 toList' (HLIR.MkTyVar r) = ([], Just r)
 toList' HLIR.MkTyRowEmpty = ([], Nothing)
-toList' (HLIR.MkTyRowExtend l t r) =
+toList' (HLIR.MkTyRowExtend l t _ r) =
   let (ls, mv) = toList' r
     in ((l, t):ls, mv)
 toList' (HLIR.MkTyRecord r) = toList' r
@@ -228,26 +230,26 @@ occursCheck name (HLIR.MkTyApp base args) = do
     occursCheck name base
     mapM_ (occursCheck name) args
 occursCheck name (HLIR.MkTyRecord t) = occursCheck name t
-occursCheck name (HLIR.MkTyRowExtend _ fieldTy rowTail) =
+occursCheck name (HLIR.MkTyRowExtend _ fieldTy _ rowTail) =
     occursCheck name fieldTy >> occursCheck name rowTail
 occursCheck _ _ = pure ()
 
-rewriteRow :: (MonadIO m, M.MonadError M.Error m) => Bool -> HLIR.Type -> Text -> m (HLIR.Type, HLIR.Type, Substitution)
-rewriteRow _ HLIR.MkTyRowEmpty newLabel = M.throw $ M.RewriteRowError HLIR.MkTyRowEmpty newLabel
-rewriteRow shouldMutate (HLIR.MkTyRowExtend label fieldTy rowTail) newLabel
+rewriteRow :: (MonadIO m, M.MonadError M.Error m) => Bool -> Bool -> HLIR.Type -> Text -> m (HLIR.Type, HLIR.Type, Substitution)
+rewriteRow _ _ HLIR.MkTyRowEmpty newLabel = M.throw $ M.RewriteRowError HLIR.MkTyRowEmpty newLabel
+rewriteRow shouldMutate b (HLIR.MkTyRowExtend label fieldTy opt rowTail) newLabel
     | newLabel == label = return (fieldTy, rowTail, mempty) -- ^ nothing to do
     | alpha@(HLIR.MkTyVar _) <- rowTail = do
         beta <- M.newType
         gamma <- M.newType
 
-        s <- applySubtypeRelation shouldMutate alpha (HLIR.MkTyRowExtend newLabel gamma beta)
+        s <- applySubtypeRelation shouldMutate alpha (HLIR.MkTyRowExtend newLabel gamma (opt || b) beta)
 
-        return (gamma, HLIR.MkTyRowExtend label fieldTy beta, s)
+        return (gamma, HLIR.MkTyRowExtend label fieldTy (opt || b) beta, s)
     | otherwise = do
-        (fieldTy', rowTail', s) <- rewriteRow shouldMutate rowTail newLabel
+        (fieldTy', rowTail', s) <- rewriteRow shouldMutate (opt || b) rowTail newLabel
 
-        return (fieldTy', HLIR.MkTyRowExtend label fieldTy rowTail', s)
-rewriteRow _ ty label = M.throw $ M.RewriteRowError ty label
+        return (fieldTy', HLIR.MkTyRowExtend label fieldTy (opt || b) rowTail', s)
+rewriteRow _ _ ty label = M.throw $ M.RewriteRowError ty label
 
 composeSubstitution :: MonadIO m => Substitution -> Substitution -> m Substitution
 composeSubstitution s1 s2 = do
