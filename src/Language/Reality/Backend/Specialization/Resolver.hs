@@ -1036,19 +1036,19 @@ resolveSpecializationInType' _ (HLIR.MkTyQuantified name) = do
     pure (HLIR.MkTyQuantified name, [])
 resolveSpecializationInType' n (HLIR.MkTyRecord ty) = do
     let (fields, row) = getAllFields ty
-        sortedRecord = Map.foldrWithKey HLIR.MkTyRowExtend row fields
+        sortedRecord = Map.foldrWithKey (\label ty acc -> HLIR.MkTyRowExtend label ty False acc) row fields
 
     (typedTy, newDefs) <- resolveSpecializationInType (n + 1) sortedRecord
     pure (HLIR.MkTyRecord typedTy, newDefs)
 resolveSpecializationInType' _ HLIR.MkTyRowEmpty = pure (HLIR.MkTyRowEmpty, [])
-resolveSpecializationInType' n (HLIR.MkTyRowExtend label ty rest) = do
+resolveSpecializationInType' n (HLIR.MkTyRowExtend label ty isOpt rest) = do
     (typedTy, newDefs1) <- resolveSpecializationInType (n + 1) ty
     (typedRest, newDefs2) <- resolveSpecializationInType (n + 1) rest
-    pure (HLIR.MkTyRowExtend label typedTy typedRest, newDefs1 ++ newDefs2)
+    pure (HLIR.MkTyRowExtend label typedTy isOpt typedRest, newDefs1 ++ newDefs2)
 
 getAllFields :: HLIR.Type -> (Map Text HLIR.Type, HLIR.Type)
 getAllFields (HLIR.MkTyRecord fields) = getAllFields fields
-getAllFields (HLIR.MkTyRowExtend label ty rest) =
+getAllFields (HLIR.MkTyRowExtend label ty _ rest) =
     let (restFields, restRow) = getAllFields rest
      in (Map.insert label ty restFields, restRow)
 getAllFields HLIR.MkTyRowEmpty = (Map.empty, HLIR.MkTyRowEmpty)
@@ -1122,7 +1122,7 @@ maybeResolveStructure depth name args = do
 
                     let structMembers = Map.toList specializedFields
                         structMembers' = List.foldl (\acc (n, ty) ->
-                                HLIR.MkTyRowExtend n ty acc) HLIR.MkTyRowEmpty structMembers
+                                HLIR.MkTyRowExtend n ty False acc) HLIR.MkTyRowEmpty structMembers
 
                     -- Creating the new specialized structure declaration
                     -- with the new name and specialized fields

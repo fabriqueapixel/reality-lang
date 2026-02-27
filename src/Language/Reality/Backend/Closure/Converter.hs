@@ -115,10 +115,10 @@ convertType (HLIR.MkTyFun argTypes returnType) = do
 convertType (HLIR.MkTyPointer pointee) = do
     (newPointee, ns) <- convertType pointee
     pure (HLIR.MkTyPointer newPointee, ns)
-convertType (HLIR.MkTyRowExtend k vt rt) = do
+convertType (HLIR.MkTyRowExtend k vt isOpt rt) = do
     (newVt, ns1) <- convertType vt
     (newRt, ns2) <- convertType rt
-    pure (HLIR.MkTyRowExtend k newVt newRt, ns1 <> ns2)
+    pure (HLIR.MkTyRowExtend k newVt isOpt newRt, ns1 <> ns2)
 convertType (HLIR.MkTyRecord t) = do
     (t', ns) <- convertType t
     pure (HLIR.MkTyRecord t', ns)
@@ -473,18 +473,21 @@ convertExpression (HLIR.MkExprStructureAccess struct field) = do
         getAllTypeFields :: HLIR.Type -> Map Text.Text HLIR.Type
         getAllTypeFields (HLIR.MkTyRecord fields) = getAllTypeFields fields
         getAllTypeFields HLIR.MkTyRowEmpty = Map.empty
-        getAllTypeFields (HLIR.MkTyRowExtend label fieldType rest) = Map.insert label fieldType (getAllTypeFields rest)
+        getAllTypeFields (HLIR.MkTyRowExtend label fieldType  _ rest) = Map.insert label fieldType (getAllTypeFields rest)
         getAllTypeFields _ = Map.empty
-convertExpression (HLIR.MkExprStructureCreation k e r _ _) = do
-    (newE, ns1, t) <- convertExpression e
-    (newR, ns2, rt) <- convertExpression r
+convertExpression (HLIR.MkExprStructureCreation k e r t rt) = do
+    (newE, ns1, _) <- convertExpression e
+    (newR, ns2, _) <- convertExpression r
 
-    rt' <- HLIR.sanitizeRecord $ HLIR.MkTyRowExtend k t rt
+    (t', ns3) <- convertType t.runIdentity
+    (rt', ns4) <- convertType rt.runIdentity
+
+    rt'' <- HLIR.sanitizeRecord $ HLIR.MkTyRowExtend k t' False rt'
 
     pure
-        ( HLIR.MkExprStructureCreation  k newE newR (Identity t) (Identity rt')
-        , ns1 <> ns2
-        , rt'
+        ( HLIR.MkExprStructureCreation  k newE newR (Identity t') (Identity rt'')
+        , ns1 <> ns2 <> ns3 <> ns4
+        , rt''
         )
 convertExpression HLIR.MkExprStructureEmpty =
     pure (HLIR.MkExprStructureEmpty, [], HLIR.MkTyRecord HLIR.MkTyRowEmpty)
@@ -571,13 +574,13 @@ convertExpression (HLIR.MkExprLetPatternIn pattern value inExpr _) = do
 buildMap :: Map Text (HLIR.TLIR "expression", HLIR.Type) -> HLIR.TLIR "expression"
 buildMap m = fst $ List.foldl' (\(acc, rt) (k, (v, t)) -> do
         let newAcc = HLIR.MkExprStructureCreation k v  acc (Identity t) (Identity rt)
-        let newRt = HLIR.MkTyRowExtend k t rt
+        let newRt = HLIR.MkTyRowExtend k t False rt
 
         (newAcc, newRt)
     ) (HLIR.MkExprStructureEmpty, HLIR.MkTyRowEmpty) (Map.toList m)
 
 buildType :: [(Text, HLIR.Type)] -> HLIR.Type
-buildType = HLIR.MkTyRecord . List.foldl' (\acc (k, t) -> HLIR.MkTyRowExtend k t acc) HLIR.MkTyRowEmpty
+buildType = HLIR.MkTyRecord . List.foldl' (\acc (k, t) -> HLIR.MkTyRowExtend k t False acc) HLIR.MkTyRowEmpty
 
 convertPattern :: (MonadIO m) => HLIR.TLIR "pattern" -> m (HLIR.TLIR "pattern", [HLIR.TLIR "toplevel"])
 convertPattern (HLIR.MkPatternLocated _ p) = convertPattern p
