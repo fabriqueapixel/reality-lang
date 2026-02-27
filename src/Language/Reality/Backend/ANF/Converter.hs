@@ -8,6 +8,7 @@ import Language.Reality.Syntax.HLIR qualified as HLIR
 import Language.Reality.Syntax.MLIR qualified as MLIR
 import qualified Data.List as List
 import qualified Data.Set as Set
+import Control.Color (printText)
 
 isReturnExpr :: HLIR.TLIR "expression" -> Bool
 isReturnExpr (HLIR.MkExprReturn _) = True
@@ -385,12 +386,13 @@ convertExpression (HLIR.MkExprCondition cond thenB elseB thenTy elseTy) = do
 convertExpression (HLIR.MkExprLocated _ e) = convertExpression e
 convertExpression (HLIR.MkExprStructureAccess struct field) = do
     (struct', l1, bs1) <- convertExpression struct
+    
     let access = MLIR.MkExprStructureAccess struct' field
     pure (access, l1, bs1)
 convertExpression (HLIR.MkExprStructureCreation k e r t rt) = do
     let (creation, rest) = buildMap (HLIR.MkExprStructureCreation k e r t rt)
 
-    record <- HLIR.sanitizeRecord $ HLIR.MkTyRecord (HLIR.MkTyRowExtend k t.runIdentity rt.runIdentity)
+    record <- HLIR.sanitizeRecord $ HLIR.MkTyRecord (HLIR.MkTyRowExtend k t.runIdentity False rt.runIdentity)
 
     (fields, l1, bs1) <- unzip3 <$> forM (Map.toList creation) (\(field, (expr, ty)) -> do
         (expr', l1, bs1) <- convertExpression expr
@@ -600,7 +602,7 @@ generateCondition x (HLIR.MkPatternLiteral l) = do
 generateCondition x (HLIR.MkPatternStructure fields) = do
     (fieldsLets, fieldsConds) <-
         mapAndUnzipM
-            (\(name, p) -> generateCondition (MLIR.MkExprStructureAccess (MLIR.MkExprDereference x) name) p)
+            (\(name, p) -> generateCondition (MLIR.MkExprStructureAccess x name) p)
             (Map.toList fields)
     pure (concat fieldsLets, concat fieldsConds)
 
@@ -631,6 +633,6 @@ isEmptyRowExpr _ = False
 
 getFields :: HLIR.Type -> Map Text HLIR.Type
 getFields (HLIR.MkTyRecord t) = getFields t
-getFields (HLIR.MkTyRowExtend field ty rest) = Map.insert field ty (getFields rest)
+getFields (HLIR.MkTyRowExtend field ty _ rest) = Map.insert field ty (getFields rest)
 getFields HLIR.MkTyRowEmpty = Map.empty
 getFields _ = error "Expected a record type"
