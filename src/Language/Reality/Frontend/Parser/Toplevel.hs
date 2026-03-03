@@ -66,7 +66,7 @@ parseTopFunctionDeclaration = do
             (\(accArgs, accKwargs, accKwargsType, accOtherKwargs) param -> case param of
                 Left ann -> (accArgs ++ [ann], accKwargs, accKwargsType, accOtherKwargs)
                 Right (name, ty, val) ->
-                    let newKwargsType = HLIR.MkTyRowExtend name ty True accKwargsType
+                    let newKwargsType = HLIR.MkTyRowExtend name ty (isJust val) accKwargsType
                         (newKwargs, newOtherKwargs) = case val of
                             Just v -> (Map.insert name v accKwargs, accOtherKwargs)
                             Nothing -> (accKwargs, Set.insert name accOtherKwargs)
@@ -264,7 +264,7 @@ parseTopProperty = do
                         newKwargs = case val of
                             Just v -> Map.insert name v accKwargs
                             Nothing -> accKwargs
-                    in (accArgs ++ [HLIR.MkAnnotation name ty], newKwargs, newKwargsType)
+                    in (accArgs, newKwargs, newKwargsType)
             )
             ([], Map.empty, HLIR.MkTyRowEmpty)
             preParams
@@ -329,7 +329,7 @@ parseTopEnumeration = do
                                     newKwargs = case val of
                                         Just v -> Map.insert name' v accKwargs
                                         Nothing -> accKwargs
-                                in (accArgs ++ [ty], newKwargs, newKwargsType)
+                                in (accArgs, newKwargs, newKwargsType)
                         )
                         ([], Map.empty, HLIR.MkTyRowEmpty)
                         args
@@ -370,11 +370,11 @@ parseTopImplementation = do
             (\(accArgs, accKwargs, accKwargsType, accOtherKwargs) param -> case param of
                 Left ann -> (accArgs ++ [ann], accKwargs, accKwargsType, accOtherKwargs)
                 Right (name, ty, val) ->
-                    let newKwargsType = HLIR.MkTyRowExtend name ty True accKwargsType
+                    let newKwargsType = HLIR.MkTyRowExtend name ty (isJust val) accKwargsType
                         (newKwargs, newOtherKwargs) = case val of
                             Just v -> (Map.insert name v accKwargs, accOtherKwargs)
                             Nothing -> (accKwargs, Set.insert name accOtherKwargs)
-                    in (accArgs ++ [HLIR.MkAnnotation name ty], newKwargs, newKwargsType, newOtherKwargs)
+                    in (accArgs, newKwargs, newKwargsType, newOtherKwargs)
             )
             ([], Map.empty, HLIR.MkTyRowEmpty, Set.empty)
             preParams

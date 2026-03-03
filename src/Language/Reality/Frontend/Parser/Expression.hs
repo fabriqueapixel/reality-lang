@@ -185,9 +185,9 @@ parseExprTernary ::
     (MonadIO m) => P.Parser m (HLIR.Position, HLIR.HLIR "expression")
 parseExprTernary = do
     ((start, _), _) <- Lex.reserved "if"
-    cond <- snd <$> parseExprFull
+    (_, cond) <- Lex.parens $ snd <$> parseExprFull
 
-    ((_, firstEnd), thenBranch) <- parseExprBlock
+    ((_, firstEnd), thenBranch) <- parseExprFull
 
     result <- P.optional $ do
         void $ Lex.reserved "else"
@@ -300,7 +300,7 @@ panic = HLIR.MkExprVarCall "GC.panic" [
         HLIR.MkExprStructureEmpty
     ]
 
-data LambdaArgument 
+data LambdaArgument
     = LamArgAnnot (HLIR.Annotation (Maybe HLIR.Type))
     | LamArgPattern (HLIR.HLIR "pattern")
     | LamArgNamed Text (Maybe HLIR.Type) (Maybe (HLIR.HLIR "expression"))
@@ -310,7 +310,7 @@ parseLambdaArguments = do
     P.sepBy parseArg Lex.comma
     where
         parseArg :: MonadIO m => P.Parser m LambdaArgument
-        parseArg = 
+        parseArg =
             P.choice [
                 P.try $ LamArgAnnot <$> parseAnnotation (snd <$> Typ.parseType)
                 , P.try $ do
@@ -323,7 +323,7 @@ parseLambdaArguments = do
                     val <- P.optional $ do
                         void $ Lex.symbol "="
                         snd <$> parseExprFull
-                    pure $ LamArgNamed name ty val  
+                    pure $ LamArgNamed name ty val
                 ]
 
 someE :: HLIR.HLIR "expression" -> HLIR.HLIR "expression"
@@ -352,10 +352,11 @@ parseExprLambda = do
                 let ann = HLIR.MkAnnotation symbol Nothing
                 pure (accArgs ++ [ann], accPats ++ [(pat, ann)], accM, accT, accOtherKwargs)
             LamArgNamed name ty val -> do
-                let newT 
-                        | Just ty' <- ty = HLIR.MkTyRowExtend name ty' True accT
+                let opt = isJust val
+                let newT
+                        | Just ty' <- ty = HLIR.MkTyRowExtend name ty' opt accT
                         | otherwise = accT
-                let newM 
+                let newM
                         | Just v <- val = Map.insert name v accM
                         | otherwise = Map.insert name (HLIR.MkExprVariable (HLIR.MkAnnotation name Nothing) []) accM
                 let newOtherKwargs = case val of
@@ -380,7 +381,7 @@ parseExprLambda = do
                 acc
                 Nothing
             ) bodyWithDefaults otherKwargs
-        
+
         bodyWithDefaults = Map.foldrWithKey
             (\name val acc -> HLIR.MkExprLetIn
                 (HLIR.MkAnnotation name Nothing)
@@ -427,7 +428,7 @@ parseExprList = do
                     Nothing
 
         listExpr = foldl' addElement (HLIR.MkExprVariable (HLIR.MkAnnotation (idx <> "_list_ref") Nothing) []) elements
-        addElement acc el = HLIR.MkExprFunctionAccess "push" acc [] [el]
+        addElement acc el = HLIR.MkExprFunctionAccess "push" acc [] [el, HLIR.MkExprStructureEmpty]
 
         letResIn = HLIR.MkExprLetIn
                     (HLIR.MkAnnotation (idx <> "_ignore") Nothing)
@@ -533,7 +534,7 @@ parsePatternFull =
             , P.try $ do
                 ((start, _), name) <- Lex.identifier
                 ((_, end), args) <- Lex.parens (P.sepBy (snd <$> parsePatternFull) Lex.comma)
-                pure ((start, end), HLIR.MkPatternConstructor name args Nothing)
+                pure ((start, end), HLIR.MkPatternConstructor name (args <> [HLIR.MkPatternWildcard]) Nothing)
 
             , P.try $ do
                 ((start, _), _) <- Lex.symbol "{"
@@ -561,7 +562,7 @@ parsePatternFull =
                 case elements of
                     [] -> pure (pos, HLIR.MkPatternConstructor "unit" [] Nothing)
                     [x] -> pure (pos, x)
-                    _ -> pure (pos, HLIR.MkPatternConstructor "Pair" elements Nothing)
+                    _ -> pure (pos, HLIR.MkPatternConstructor "Pair" (elements <> [HLIR.MkPatternWildcard]) Nothing)
             ]
 
 parseExprTuple ::
@@ -670,7 +671,7 @@ parseExprFull = Lex.locateWith <$> P.makeExprParser parseExprTerm operators
     parseExprArgs = do
         (pos, args) <- Lex.parens $ P.sepBy parseExprArg Lex.comma
 
-        block <- P.try $ P.optional (snd <$> (P.try parseExprLambda <|> parseExprBlock))
+        block <- P.optional (snd <$> (P.try parseExprLambda <|> parseExprBlock))
 
         let (exprArgs, namedArgs) = List.partition (\case
                     ArgExpr _ -> True
@@ -873,10 +874,12 @@ parseStmtForIn ::
     (MonadIO m) => P.Parser m (HLIR.Position, HLIR.HLIR "expression")
 parseStmtForIn = do
     ((start, _), _) <- Lex.reserved "for"
+    void $ Lex.symbol "("
     pattern <- Lex.identifier
     void $ Lex.reserved "in"
     iterable <- snd <$> parseExprFull
-    ((_, end), body) <- parseExprBlock
+    void $ Lex.symbol ")"
+    ((_, end), body) <- parseExprFull
 
     let iterableVar = HLIR.MkAnnotation "_iterable" Nothing
 
@@ -897,7 +900,7 @@ parseStmtWhile ::
     (MonadIO m) => P.Parser m (HLIR.Position, HLIR.HLIR "expression")
 parseStmtWhile = do
     ((start, _), _) <- Lex.reserved "while"
-    cond <- snd <$> parseExprFull
+    (_, cond) <- Lex.parens $ snd <$> parseExprFull
     ((_, end), body) <- parseExprBlock
 
     pure

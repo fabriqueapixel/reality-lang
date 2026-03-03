@@ -55,7 +55,7 @@ parseType =
 
             ((_, end), ret) <- Lex.symbol "->" *> parseType
 
-            let kwargsType = List.foldl' (\acc (argName, argType) -> HLIR.MkTyRowExtend argName argType False acc) HLIR.MkTyRowEmpty namedArgTypes
+            let kwargsType = List.foldl' (\acc (argName, argType) -> HLIR.MkTyRowExtend argName (HLIR.MkTyApp (HLIR.MkTyId "Option") [argType]) False acc) HLIR.MkTyRowEmpty namedArgTypes
 
             pure ((start, end), (map snd argTypes <> [HLIR.MkTyRecord kwargsType]) HLIR.:->: ret)
         , -- Record type constructor
