@@ -1058,7 +1058,7 @@ checkE (argTypes HLIR.:->: retType) (HLIR.MkExprLambda args retType' body) = do
         , mempty
         )
 checkE (HLIR.MkTyRecord expected) (HLIR.MkExprStructureCreation field value record _ _) = do
-    (vTy, rTy, _) <- M.rewriteRow True True expected field
+    (vTy, rTy, _) <- M.rewriteRow True False expected field
 
     (v', cs1, bs1) <- checkE vTy value
     (e', cs2, bs2) <- checkE (HLIR.MkTyRecord rTy) record
@@ -1081,6 +1081,12 @@ checkE expected HLIR.MkExprStructureEmpty = do
         isOption _ = pure False
 
     let expectedFields = buildMap expected mempty
+
+    forM_ (Map.toList expectedFields) $ \(field, _) -> do
+        (_, opt) <- fetchField expected field
+
+        unless opt $
+            M.throw (M.FieldNotFound field)
     
     reconstructedMap <- foldlM
             (\acc (field, fieldType) -> do
@@ -1315,3 +1321,15 @@ isFunctionType (HLIR.MkTyVar ref) = do
         HLIR.Link t -> isFunctionType t
         HLIR.Unbound _ _ -> pure False
 isFunctionType _ = pure False
+
+fetchField :: MonadIO m => HLIR.Type -> Text -> m (Maybe HLIR.Type, Bool)
+fetchField (HLIR.MkTyRecord t) fieldName = fetchField t fieldName
+fetchField (HLIR.MkTyRowExtend field fieldType isOpt rest) fieldName
+    | field == fieldName = pure (Just fieldType, isOpt)
+    | otherwise = fetchField rest fieldName
+fetchField (HLIR.MkTyVar ref) fieldName = do
+    ty <- readIORef ref 
+    case ty of
+        HLIR.Link t -> fetchField t fieldName
+        HLIR.Unbound _ _ -> pure (Nothing, False)
+fetchField _ _ = pure (Nothing, False)
