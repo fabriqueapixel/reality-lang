@@ -230,7 +230,7 @@ pattern MkExprTuple ::
 pattern MkExprTuple a b =
     MkExprApplication
         (MkExprVariable (MkAnnotation "Pair" Nothing) [])
-        [a, b]
+        [a, b, MkExprStructureEmpty]
         Nothing
 
 pattern MkExprConditionIs ::
