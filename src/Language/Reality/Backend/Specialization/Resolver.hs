@@ -30,9 +30,10 @@ runSpecializationResolver toplevels = do
     writeIORef defaultSpecializer emptySpecializer
 
     allFunctionSignatures <- getAllFunctionSignatures toplevels
+    allImplementations <- getAllImplementations toplevels
 
     modifyIORef' defaultSpecializer $ \s ->
-        s{variables = allFunctionSignatures `Map.union` s.variables}
+        s{variables = allFunctionSignatures `Map.union` s.variables, implementations = allImplementations `Map.union` s.implementations}
 
     resolved <- forM toplevels $ \n -> do
         (resolvedNode, newDefs) <- resolveSpecializationSingular n
@@ -56,8 +57,22 @@ getAllFunctionSignatures (HLIR.MkTopConstantDeclaration ann expr : xs) = do
     let scheme = HLIR.Forall [] ann.typeValue
     pure $ Map.insert ann.name (scheme, Just (HLIR.MkTopConstantDeclaration ann expr)) rest
 getAllFunctionSignatures (HLIR.MkTopLocated _ n : xs) = getAllFunctionSignatures (n : xs)
+getAllFunctionSignatures (HLIR.MkTopPublic n : xs) = getAllFunctionSignatures (n : xs)
 getAllFunctionSignatures (_ : xs) = getAllFunctionSignatures xs
 getAllFunctionSignatures [] = pure Map.empty
+
+getAllImplementations :: (MonadIO m) => [HLIR.TLIR "toplevel"] -> m (Map (Text, HLIR.Scheme HLIR.Type) (Maybe (HLIR.TLIR "toplevel")))
+getAllImplementations (HLIR.MkTopImplementation forType header parameters returnType body : xs) = do
+    rest <- getAllImplementations xs
+    let scheme =
+            HLIR.Forall
+                header.typeValue
+                ((forType.typeValue : map (.typeValue) parameters) HLIR.:->: returnType)
+    pure $ Map.insert (header.name, scheme) (Just $ HLIR.MkTopFunctionDeclaration header (forType : parameters) returnType body) rest   
+getAllImplementations (HLIR.MkTopLocated _ n : xs) = getAllImplementations (n : xs) 
+getAllImplementations (HLIR.MkTopPublic n : xs) = getAllImplementations (n : xs)
+getAllImplementations (_ : xs) = getAllImplementations xs
+getAllImplementations [] = pure Map.empty
 
 -- | Resolve specialization in singular toplevel nodes.
 -- | This function takes a toplevel node, and returns a toplevel node with
@@ -1036,7 +1051,7 @@ resolveSpecializationInType' _ (HLIR.MkTyQuantified name) = do
     pure (HLIR.MkTyQuantified name, [])
 resolveSpecializationInType' n (HLIR.MkTyRecord ty) = do
     let (fields, row) = getAllFields ty
-        sortedRecord = Map.foldrWithKey (\label ty acc -> HLIR.MkTyRowExtend label ty False acc) row fields
+        sortedRecord = Map.foldrWithKey (\label ty' acc -> HLIR.MkTyRowExtend label ty' False acc) row fields
 
     (typedTy, newDefs) <- resolveSpecializationInType (n + 1) sortedRecord
     pure (HLIR.MkTyRecord typedTy, newDefs)

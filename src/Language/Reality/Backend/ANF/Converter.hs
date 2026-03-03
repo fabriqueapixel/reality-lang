@@ -8,7 +8,6 @@ import Language.Reality.Syntax.HLIR qualified as HLIR
 import Language.Reality.Syntax.MLIR qualified as MLIR
 import qualified Data.List as List
 import qualified Data.Set as Set
-import Control.Color (printText)
 
 isReturnExpr :: HLIR.TLIR "expression" -> Bool
 isReturnExpr (HLIR.MkExprReturn _) = True
