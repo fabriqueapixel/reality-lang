@@ -19,6 +19,12 @@ mapAndUnzip3M f xs = do
   (bs, cs, ds) <- unzip3 <$> mapM f xs
   pure (bs, cs, ds)
 
+stringEqualityFunction :: Text
+stringEqualityFunction = "string_eq"
+
+equalityOperator :: Text
+equalityOperator = "=="
+
 unitExpr :: HLIR.TLIR "expression"
 unitExpr = HLIR.MkExprVariable (HLIR.MkAnnotation "unit" (Identity (HLIR.MkTyId "unit"))) []
 
@@ -578,7 +584,7 @@ generateCondition e (HLIR.MkPatternVariable ann) = do
   let tag = MLIR.MkExprStructureAccess e "_tag"
       cond =
         MLIR.MkExprApplication
-          (MLIR.MkExprVariable "string_eq")
+          (MLIR.MkExprVariable stringEqualityFunction)
           [tag, MLIR.MkExprLiteral (MLIR.MkLitString ann.name), MLIR.MkExprStructureCreation Map.empty]
 
   pure ([], [cond])
@@ -586,7 +592,7 @@ generateCondition e (HLIR.MkPatternConstructor name patterns _) = do
   let tag = MLIR.MkExprStructureAccess e "_tag"
       cond =
         MLIR.MkExprApplication
-          (MLIR.MkExprVariable "string_eq")
+          (MLIR.MkExprVariable stringEqualityFunction)
           [tag, MLIR.MkExprLiteral (MLIR.MkLitString name), MLIR.MkExprStructureCreation Map.empty]
 
   (patternsLets, patternsConds) <-
@@ -605,11 +611,11 @@ generateCondition e (HLIR.MkPatternConstructor name patterns _) = do
 generateCondition _ HLIR.MkPatternWildcard = pure ([], [])
 generateCondition x (HLIR.MkPatternLiteral l) = do
   let fun = case l of
-        HLIR.MkLitInt {} -> "=="
-        HLIR.MkLitChar {} -> "=="
-        HLIR.MkLitString {} -> "string_eq"
-        HLIR.MkLitBool {} -> "=="
-        HLIR.MkLitFloat {} -> "=="
+        HLIR.MkLitInt {} -> equalityOperator
+        HLIR.MkLitChar {} -> equalityOperator
+        HLIR.MkLitString {} -> stringEqualityFunction
+        HLIR.MkLitBool {} -> equalityOperator
+        HLIR.MkLitFloat {} -> equalityOperator
 
       cond =
         MLIR.MkExprApplication
