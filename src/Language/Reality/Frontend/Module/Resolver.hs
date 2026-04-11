@@ -2,14 +2,12 @@
 
 module Language.Reality.Frontend.Module.Resolver where
 
-import Control.Color (printText)
 import Control.Monad.Except qualified as M
 import Control.Monad.Result qualified as M
 import Data.Map qualified as Map
 import Data.Text qualified as Text
 import GHC.IO qualified as IO
 import Language.C
-import Language.C.Analysis (concatMapM)
 import Language.C.Data.Ident (Ident (Ident))
 import Language.C.System.GCC (newGCC)
 import Language.Reality.Syntax.HLIR qualified as HLIR
