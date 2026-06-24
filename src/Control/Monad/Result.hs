@@ -48,7 +48,15 @@ handle (Left (err, pos@(p1, _))) _ = liftIO $ do
                 , pos
                 )
                 "Resolution"
-        VariableNotFound name ->
+        VariableNotFound name (Just ty) ->
+            printErrorFromString
+                Nothing
+                ( "Variable " <> show name <> " not found in type " <> show (toText ty)
+                , Just "check for typo issue with the variable"
+                , pos
+                )
+                "Resolution"
+        VariableNotFound name Nothing ->
             printErrorFromString
                 Nothing
                 ( "Variable " <> show name <> " not found"
@@ -252,7 +260,7 @@ data RealityError
     = ParseError P.ParseError
     | CyclicModuleDependency FilePath ImportStack
     | ModuleNotFound FilePath
-    | VariableNotFound Text
+    | VariableNotFound Text (Maybe HLIR.Type)
     | CompilerError Text
     | UnificationFail HLIR.Type HLIR.Type
     | CyclicTypeVariable Text HLIR.Type
@@ -286,7 +294,8 @@ instance Show RealityError where
         "Module "
             <> show (normalise path)
             <> " not found"
-    show (VariableNotFound name) = "Variable " <> show name <> " not found"
+    show (VariableNotFound name (Just ty)) = "Variable " <> show name <> " not found in type " <> show (toText ty)
+    show (VariableNotFound name Nothing) = "Variable " <> show name <> " not found"
     show (CompilerError msg) = "Reality INTERNAL ERROR: " <> show msg
     show (UnificationFail t1 t2) = "Expected " <> show (toText t1) <> ", but got " <> show (toText t2)
     show (InvalidArgumentQuantity n k) = "Invalid number of arguments, expected " <> show n <> ", received " <> show k

@@ -6,6 +6,7 @@ import GHC.IO qualified as IO
 import Language.Reality.Syntax.HLIR qualified as HLIR
 import Prelude hiding (Constraint)
 import qualified Data.Set as Set
+import qualified Data.List as List
 
 -- | The state of the type checker monad.
 -- | This state includes:
@@ -21,7 +22,7 @@ import qualified Data.Set as Set
 -- | It is stored in an IORef to allow for mutable state in the type checker monad.
 data CheckerState = CheckerState
     { counter :: IORef Int
-    , environment :: Map Text (HLIR.Scheme HLIR.Type)
+    , environment :: [(Text, HLIR.Scheme HLIR.Type)]
     , typeAliases :: Map Text (HLIR.Scheme HLIR.Type)
     , structures :: Map Text (HLIR.Scheme (Map Text HLIR.Type))
     , implementations :: Map (Text, HLIR.Scheme HLIR.Type) (HLIR.Scheme HLIR.Type)
@@ -29,6 +30,7 @@ data CheckerState = CheckerState
     , returnType :: Maybe HLIR.Type
     , isInLoop :: Bool
     , typeVariables :: Set Text
+    , patternAliases :: Map Text (HLIR.Scheme HLIR.Type, HLIR.HLIR "pattern")
     }
     deriving (Eq, Ord, Generic)
 
@@ -56,11 +58,11 @@ data Constraint
 -- | The environment is restored to its previous state after the action is completed.
 -- | This function takes a mapping from variable names to type schemes, and an action
 -- | to perform with the extended environment.
-withEnvironment :: (MonadIO m) => Map Text (HLIR.Scheme HLIR.Type) -> m a -> m a
+withEnvironment :: (MonadIO m) => [(Text, HLIR.Scheme HLIR.Type)] -> m a -> m a
 withEnvironment env action = do
     ref <- liftIO $ readIORef defaultCheckerState
     let oldEnv = ref.environment
-    liftIO $ writeIORef defaultCheckerState ref{environment = Map.union env oldEnv}
+    liftIO $ writeIORef defaultCheckerState ref{environment = env `List.union` oldEnv}
     result <- action
     ref' <- liftIO $ readIORef defaultCheckerState
     liftIO $ writeIORef defaultCheckerState ref'{environment = oldEnv}
@@ -72,7 +74,7 @@ defaultCheckerState = IO.unsafePerformIO $ do
     newIORef
         CheckerState
             { counter = ref
-            , environment = Map.empty
+            , environment = []
             , typeAliases = Map.empty
             , structures = Map.empty
             , implementations = Map.empty
@@ -80,6 +82,7 @@ defaultCheckerState = IO.unsafePerformIO $ do
             , returnType = Nothing
             , isInLoop = False
             , typeVariables = Set.empty
+            , patternAliases = Map.empty
             }
 
 -- | NEW SYMBOL
@@ -120,7 +123,7 @@ resetState = do
             defaultCheckerState
             CheckerState
                 { counter = IO.unsafePerformIO (newIORef 0)
-                , environment = Map.empty
+                , environment = []
                 , typeAliases = Map.empty
                 , structures = Map.empty
                 , implementations = Map.empty
@@ -128,6 +131,7 @@ resetState = do
                 , returnType = Nothing
                 , isInLoop = False
                 , typeVariables = Set.empty
+                , patternAliases = Map.empty
                 }
 
 -- | INSTANTIATE AND SUB
@@ -222,9 +226,12 @@ applySubstitution s (HLIR.MkTyQuantified name) =
         Nothing -> pure $ HLIR.MkTyQuantified name
 applySubstitution s (HLIR.MkTyRecord t) = do
     t' <- applySubstitution s t
-    pure $ HLIR.MkTyRecord t'   
+    pure $ HLIR.MkTyRecord t'
 applySubstitution _ HLIR.MkTyRowEmpty = pure HLIR.MkTyRowEmpty
 applySubstitution s (HLIR.MkTyRowExtend label fieldType opt rest) = do
     fieldType' <- applySubstitution s fieldType
     rest' <- applySubstitution s rest
     pure $ HLIR.MkTyRowExtend label fieldType' opt rest'
+applySubstitution s (HLIR.MkTyUnion fields) = do
+    fields' <- Map.traverseWithKey (\_ ty -> applySubstitution s ty) fields
+    pure $ HLIR.MkTyUnion fields'

@@ -372,6 +372,32 @@ codegenType shouldPutEnv ext def generics (HLIR.MkTyClosure env fun) = do
             modifyIORef' types (<> [(buildTypeWithRest [("environment", env), ("function", fun)] HLIR.MkTyRowEmpty, name)])
 
             pure $ Text.concat ["struct ", name, " ", fromMaybe "" def]
+codegenType shouldPutEnv ext def generics (HLIR.MkTyUnion unionTy) = do
+    let ty = removeDuplicateFields (HLIR.MkTyUnion unionTy)
+    types' <- readIORef types
+
+    let found = findTypeByType types' ty
+
+    case found of
+        Just typeName -> pure $ Text.concat [typeName, " ", fromMaybe "" def]
+        Nothing -> do
+            ty' <- case ty of
+                HLIR.MkTyUnion u -> do
+                    fieldLines <- mapM (\(label, ty'') -> do
+                        tyStr <- codegenType shouldPutEnv ext Nothing generics ty''
+                        pure $ Text.concat [tyStr, " ", varify label, ";"]
+                        ) (Map.toList u)
+                    pure $ Text.intercalate " " fieldLines
+                _ -> codegenType shouldPutEnv ext def generics ty
+
+            name <- ("_union_" <>) <$> freshSymbol
+
+            let structDef = Text.concat ["typedef union ", name, " { ", ty', "} ", name, ";"]
+
+            modifyIORef' typedefs (<> [structDef])
+            modifyIORef' types (<> [(ty, name)])
+
+            pure $ Text.concat ["union ", name, " ", fromMaybe "" def]
 codegenType shouldPutEnv ext def generics (HLIR.MkTyRecord recTy) = do
     let ty = removeDuplicateFields (HLIR.MkTyRecord recTy)
     types' <- readIORef types

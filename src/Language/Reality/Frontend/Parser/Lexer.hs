@@ -55,13 +55,16 @@ reservedWords =
         [ "mod"
         , "let"
         , "import"
+        , "pragma"
         , "fn"
         , "pub"
         , "const"
         , "in"
+        , "do"
+        , "return"
         , "if"
+        , "then"
         , "else"
-        , "extern"
         , "is"
         , "new"
         ]
@@ -70,7 +73,7 @@ reservedWords =
 -- | This is an utility function that converts a non-lexeme parser
 -- | into a lexeme parser
 lexeme :: (MonadIO m) => P.Parser m a -> P.Parser m (Position, a)
-lexeme p = L.lexeme scn $ do
+lexeme p = L.lexeme sc $ do
     start <- P.getSourcePos
     r <- p
     end <- P.getSourcePos
@@ -243,3 +246,67 @@ isInteger x = (ceiling x :: Integer) == floor x
 
 locateWith :: (Locate a) => (Position, a) -> (Position, a)
 locateWith (p, x) = (p, locate x p)
+
+sc :: (MonadIO m) => P.Parser m ()
+sc = L.space (void $ P.takeWhile1P Nothing (\c -> c == ' ' || c == '\t')) lineComment multilineComment
+
+indentedBy :: (MonadIO m) => Int -> P.Parser m a -> P.Parser m [a]
+indentedBy n p = do
+  -- Parse subsequent elements that are indented more than the first element
+  P.some . P.try $ do
+      void scn
+      nextColumn <- P.indentLevel
+
+      if nextColumn /= P.mkPos n
+          then fail "Expected indentation level to be greater than or equal to the first element"
+          else p <* sc
+
+indentedSepBy :: (MonadIO m) => P.Parser m a -> P.Parser m sep -> P.Parser m [(Position, a)]
+indentedSepBy p sep = do
+    void scn
+    
+    refIndent <- P.indentLevel
+    refLine <- P.sourceLine <$> P.getSourcePos
+
+    first' <- lexeme p
+
+    rest <- P.many . P.try $ do
+      P.lookAhead $ do
+        void $ scn >> sep >> scn
+
+        nextColumn <- P.indentLevel
+        currentLine <- P.sourceLine <$> P.getSourcePos
+
+        when ((currentLine /= refLine && nextColumn /= refIndent) || (currentLine == refLine && nextColumn <= refIndent)) $ 
+          fail "Expected indentation level to be greater than or equal to the first element"
+
+      void $ scn >> sep >> scn
+      lexeme p
+
+    return $ first' : rest
+
+indented :: (MonadIO m) => P.Parser m a -> P.Parser m [a]
+indented p = do
+    void scn
+
+    -- Get the current indentation level
+    currentIndent <- P.indentLevel
+
+    -- Parse the first element
+    first' <- p
+
+    -- Parse subsequent elements that are indented more than the first element
+    rest <- P.many . P.try $ do
+        void scn
+
+        nextColumn <- P.indentLevel
+
+        if nextColumn /= currentIndent
+            then fail "Expected indentation level to be greater than or equal to the first element"
+            else p
+
+    return (first' : rest)
+
+nonIndented :: (MonadIO m) => P.Parser m a -> P.Parser m [a]
+nonIndented = indentedBy 1
+

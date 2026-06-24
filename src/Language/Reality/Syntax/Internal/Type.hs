@@ -7,6 +7,7 @@ import Data.Text qualified as T
 import GHC.IO qualified as IO
 import GHC.Show qualified as S
 import Prelude hiding (Type)
+import qualified Data.Map as Map
 
 -- | LEVEL TYPE
 -- | Level represents the level of a type variable. It is used to determine the
@@ -36,29 +37,30 @@ type IsUnion = Bool
 -- | - MkTyVar: Represents a type variable, such as "A", "B", "C", etc.
 -- | - MkTyQuantified: Represents a quantified type, such as "forall A. A -> A".
 data Type
-    = MkTyId Text
-    | MkTyApp Type [Type]
-    | MkTyVar (IORef TyVar)
-    | MkTyQuantified Text
-    | MkTyRecord Type
-    | MkTyRowEmpty
-    | MkTyRowExtend Text Type Bool Type
-    deriving (Ord, Generic)
+  = MkTyId Text
+  | MkTyApp Type [Type]
+  | MkTyVar (IORef TyVar)
+  | MkTyQuantified Text
+  | MkTyRecord Type
+  | MkTyRowEmpty
+  | MkTyRowExtend Text Type Bool Type
+  | MkTyUnion (Map Text Type)
+  deriving (Ord, Generic)
 
 -- | ORD INSTANCE FOR TYPE
 -- | Ord instance is not trivially derivable for the Type type because it contains
 -- | a reference to an IORef. So we need to define the Ord instance manually.
 -- | To achieve that easily, we can compare the values of the IORefs.
 instance (Ord a) => Ord (IORef a) where
-    compare a b = compare (IO.unsafePerformIO $ readIORef a) (IO.unsafePerformIO $ readIORef b)
+  compare a b = compare (IO.unsafePerformIO $ readIORef a) (IO.unsafePerformIO $ readIORef b)
 
 -- | TYPE VARIABLES
 -- | Type variable represents a type variable in Reality. It can either be a link to
 -- | another type or an unbound type variable.
 data TyVar
-    = Link Type
-    | Unbound QuVar Level
-    deriving (Eq, Ord, Generic)
+  = Link Type
+  | Unbound QuVar Level
+  deriving (Eq, Ord, Generic)
 
 -- | TYPE SCHEME
 -- | A type scheme is a "type" with bound quantified variables. It is used to
@@ -70,24 +72,24 @@ data TyVar
 -- | It may not contains free variables, in other words, all variables mustn't
 -- | escape the scope of the quantifiers.
 data Scheme t = Forall [QuVar] t
-    deriving (Eq, Ord, Show)
+  deriving (Eq, Ord, Show)
 
 -- | EQUALITY INSTANCE FOR TYPE
 -- | Equality instance is not trivially derivable for the Type type because it contains
 -- | a reference to an IORef. So we need to define the Eq instance manually.
 -- | To achieve that easily, we can compare the values of the IORefs.
 instance Eq Type where
-    MkTyId a == MkTyId b = a == b
-    MkTyVar a == MkTyVar b = do
-        let a' = IO.unsafePerformIO $ readIORef a
-        let b' = IO.unsafePerformIO $ readIORef b
-        a' == b'
-    MkTyApp a b == MkTyApp c d = a == c && b == d
-    MkTyQuantified a == MkTyQuantified b = a == b
-    MkTyRecord a == MkTyRecord b = a == b
-    MkTyRowEmpty == MkTyRowEmpty = True
-    MkTyRowExtend a1 b1 opt c1 == MkTyRowExtend a2 b2 opt' c2 = a1 == a2 && b1 == b2 && c1 == c2 && opt == opt'
-    _ == _ = False
+  MkTyId a == MkTyId b = a == b
+  MkTyVar a == MkTyVar b = do
+    let a' = IO.unsafePerformIO $ readIORef a
+    let b' = IO.unsafePerformIO $ readIORef b
+    a' == b'
+  MkTyApp a b == MkTyApp c d = a == c && b == d
+  MkTyQuantified a == MkTyQuantified b = a == b
+  MkTyRecord a == MkTyRecord b = a == b
+  MkTyRowEmpty == MkTyRowEmpty = True
+  MkTyRowExtend a1 b1 opt c1 == MkTyRowExtend a2 b2 opt' c2 = a1 == a2 && b1 == b2 && c1 == c2 && opt == opt'
+  _ == _ = False
 
 -- | FUNCTION TYPE
 -- | Function type is a type that represents a function in Reality. It consists of
@@ -124,7 +126,7 @@ pattern MkTyUnit = MkTyId "unit"
 -- | List type is a type that represents a list of values in Reality. It is used
 -- | to represent a sequence of values of the same type.
 pattern MkTyList :: Type -> Type
-pattern MkTyList a = MkTyApp (MkTyId "List") [a]
+pattern MkTyList a = MkTyApp (MkTyId "list") [a]
 
 -- | POINTER TYPE
 -- | Pointer type is a type that represents a pointer to a value in Reality.
@@ -142,72 +144,73 @@ pattern MkTyClosure a b = MkTyApp (MkTyId "#closure") [a, b]
 -- | Tuple type is a type that represents a tuple of values in Reality. It is used
 -- | to represent a fixed-size collection of values of different types.
 pattern MkTyTuple :: Type -> Type -> Type
-pattern MkTyTuple a b = MkTyApp (MkTyId "Tuple") [a, b]
+pattern MkTyTuple a b = MkTyApp (MkTyId "tuple") [a, b]
 
 instance ToText Type where
-    toText (MkTyId a) = a
-    toText (args :->: ret) = T.concat ["(", T.intercalate ", " (map toText args), ") -> ", toText ret]
-    toText (MkTyTuple a b) = T.concat ["(", toText a, ", ", toText b, ")"]
-    toText (MkTyApp a b) = T.concat [toText a, "[", T.intercalate ", " (map toText b), "]"]
-    toText (MkTyVar a) = do
-        let a' = IO.unsafePerformIO $ readIORef a
-        toText a'
-    toText (MkTyQuantified a) = "'" <> a
-    toText (MkTyRecord t) = T.concat ["{ ", toText t, " }"]
-    toText MkTyRowEmpty = "empty"
-    toText (MkTyRowExtend label fieldType opt rest) =
-        T.concat [label, if opt then "?" else "", ": ", toText fieldType, " | ", toText rest]
+  toText (MkTyId a) = a
+  toText (args :->: ret) = T.concat ["(", T.intercalate ", " (map toText args), ") -> ", toText ret]
+  toText (MkTyTuple a b) = T.concat ["(", toText a, ", ", toText b, ")"]
+  toText (MkTyApp a b) = T.concat [toText a, "[", T.intercalate ", " (map toText b), "]"]
+  toText (MkTyVar a) = do
+    let a' = IO.unsafePerformIO $ readIORef a
+    toText a'
+  toText (MkTyQuantified a) = "'" <> a
+  toText (MkTyRecord t) = T.concat ["{ ", toText t, " }"]
+  toText MkTyRowEmpty = "empty"
+  toText (MkTyRowExtend label fieldType opt rest) =
+    T.concat [label, if opt then "?" else "", ": ", toText fieldType, " | ", toText rest]
+  toText (MkTyUnion fields) =
+    T.concat ["{ ", T.intercalate " | " (map (\(label, ty) -> label <> ": " <> toText ty) (Map.toList fields)), " }"]
 
-sanitizeRecord :: MonadIO m => Type -> m Type
+sanitizeRecord :: (MonadIO m) => Type -> m Type
 sanitizeRecord (MkTyRecord t) = do
-    t' <- sanitizeRecord t
+  t' <- sanitizeRecord t
 
-    case t' of
-        MkTyRecord rec' -> pure $ MkTyRecord rec'
-        _ -> pure $ MkTyRecord t'
+  case t' of
+    MkTyRecord rec' -> pure $ MkTyRecord rec'
+    _ -> pure $ MkTyRecord t'
 sanitizeRecord (MkTyRowExtend label fieldType opt rest) = do
-    fieldType' <- sanitizeRecord fieldType
-    rest' <- sanitizeRecord rest
-    case rest' of
-        MkTyRecord t -> do
-            t' <- sanitizeRecord t
-            pure $ MkTyRecord (MkTyRowExtend label fieldType' opt t')
-        _ -> pure $ MkTyRowExtend label fieldType' opt rest'
+  fieldType' <- sanitizeRecord fieldType
+  rest' <- sanitizeRecord rest
+  case rest' of
+    MkTyRecord t -> do
+      t' <- sanitizeRecord t
+      pure $ MkTyRecord (MkTyRowExtend label fieldType' opt t')
+    _ -> pure . MkTyRecord $ MkTyRowExtend label fieldType' opt rest'
 sanitizeRecord t = pure t
 
-prettify :: MonadIO m => Type -> m Text
+prettify :: (MonadIO m) => Type -> m Text
 prettify ty = do
-    ty' <- simplify ty
+  ty' <- simplify ty
 
-    case ty' of
-        MkTyId a -> pure a
-        args :->: ret -> do
-            argsText <- mapM prettify args
-            retText <- prettify ret
+  case ty' of
+    MkTyId a -> pure a
+    args :->: ret -> do
+      argsText <- mapM prettify args
+      retText <- prettify ret
 
-            pure $ T.concat ["fn_", T.intercalate "_" argsText, "_to_", retText]
-
-        MkTyApp a b -> do
-            aText <- prettify a
-            bText <- mapM prettify b
-            pure $ T.concat [aText, "_of_", T.intercalate "_and_" bText]
-
-        MkTyVar a -> do
-            let a' = IO.unsafePerformIO $ readIORef a
-            case a' of
-                Link b -> prettify b
-                Unbound name _ -> pure name
-
-        MkTyQuantified a -> pure a
-
-        MkTyRecord t -> prettify t
-
-        MkTyRowEmpty -> pure "row_empty"
-
-        MkTyRowExtend label fieldType opt rest -> do
-            fieldTypeText <- prettify fieldType
-            restText <- prettify rest
-            pure $ T.concat [label, if opt then "?" else "", "_of_", fieldTypeText, "_and_", restText]
+      pure $ T.concat ["fn_", T.intercalate "_" argsText, "_to_", retText]
+    MkTyApp a b -> do
+      aText <- prettify a
+      bText <- mapM prettify b
+      pure $ T.concat [aText, "_of_", T.intercalate "_and_" bText]
+    MkTyVar a -> do
+      let a' = IO.unsafePerformIO $ readIORef a
+      case a' of
+        Link b -> prettify b
+        Unbound name _ -> pure name
+    MkTyQuantified a -> pure a
+    MkTyRecord t -> prettify t
+    MkTyRowEmpty -> pure "row_empty"
+    MkTyRowExtend label fieldType opt rest -> do
+      fieldTypeText <- prettify fieldType
+      restText <- prettify rest
+      pure $ T.concat [label, if opt then "?" else "", "_of_", fieldTypeText, "_and_", restText]
+    MkTyUnion fields -> do
+      fieldsText <- mapM (\(label, ty'') -> do
+        tyText <- prettify ty''
+        pure $ label <> "_of_" <> tyText) (Map.toList fields)
+      pure $ T.concat ["union_", T.intercalate "_or_" fieldsText]
 
 -- | TYPE SIMPLIFICATION
 -- | Given a type, simplify it by following the links of type variables until
@@ -216,41 +219,41 @@ prettify ty = do
 -- | actual type.
 simplify :: (MonadIO m) => Type -> m Type
 simplify (MkTyVar a) = do
-    a' <- readIORef a
-    case a' of
-        Link b -> simplify b
-        _ -> pure $ MkTyVar a
+  a' <- readIORef a
+  case a' of
+    Link b -> simplify b
+    _ -> pure $ MkTyVar a
 simplify (args :->: ret) = do
-    args' <- mapM simplify args
-    ret' <- simplify ret
-    pure $ args' :->: ret'
+  args' <- mapM simplify args
+  ret' <- simplify ret
+  pure $ args' :->: ret'
 simplify (MkTyApp a b) = do
-    a' <- simplify a
-    b' <- mapM simplify b
-    pure $ MkTyApp a' b'
+  a' <- simplify a
+  b' <- mapM simplify b
+  pure $ MkTyApp a' b'
 simplify (MkTyRecord t) = do
-    t' <- simplify t
-    pure $ MkTyRecord t'
+  t' <- simplify t
+  pure $ MkTyRecord t'
 simplify MkTyRowEmpty = pure MkTyRowEmpty
 simplify (MkTyRowExtend label fieldType opt rest) = do
-    fieldType' <- simplify fieldType
-    rest' <- simplify rest
-    pure $ MkTyRowExtend label fieldType' opt rest'
+  fieldType' <- simplify fieldType
+  rest' <- simplify rest
+  pure $ MkTyRowExtend label fieldType' opt rest'
 simplify a = pure a
 
 instance ToText TyVar where
-    toText (Link a) = toText a
-    toText (Unbound a l) = a <> "@" <> T.pack (show l)
+  toText (Link a) = toText a
+  toText (Unbound a l) = a <> "@" <> T.pack (show l)
 
 instance ToText (Maybe Type) where
-    toText (Just a) = toText a
-    toText Nothing = "infer"
+  toText (Just a) = toText a
+  toText Nothing = "infer"
 
 instance (ToText t) => ToText (Scheme t) where
-    toText (Forall a b) = T.concat ["forall ", T.intercalate ", " a, ". ", toText b]
+  toText (Forall a b) = T.concat ["forall ", T.intercalate ", " a, ". ", toText b]
 
 instance ToText (Identity Type) where
-    toText (Identity a) = toText a
+  toText (Identity a) = toText a
 
 instance Show Type where
-    show = T.unpack . toText
+  show = T.unpack . toText

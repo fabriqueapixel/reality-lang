@@ -91,13 +91,6 @@ removePatternFromFree (HLIR.MkExprWhile cond body _ inExpr) = do
     (   freeCond <> freeBody <> freeInExpr
         , freeP1 <> freeP2 <> freeP3
         )
-removePatternFromFree (HLIR.MkExprFunctionAccess _ this _ exprs) = do
-    let (freeThis, freeP1) = removePatternFromFree this
-        (freeExprs, freeP2) = foldl' (\(accFree, accP) expr -> do
-                let (freeExpr, freePattern) = removePatternFromFree expr
-                (accFree <> freeExpr, accP <> freePattern)
-            ) (Map.empty, Map.empty) exprs
-    (freeThis <> freeExprs, freeP1 <> freeP2)
 removePatternFromFree (HLIR.MkExprReturn e) = removePatternFromFree e
 removePatternFromFree HLIR.MkExprBreak = (Map.empty, Map.empty)
 removePatternFromFree HLIR.MkExprContinue = (Map.empty, Map.empty)
@@ -114,6 +107,14 @@ removePatternFromFree (HLIR.MkExprLetPatternIn pat value inExpr _) = do
         , freeP'
         )
 removePatternFromFree HLIR.MkExprStructureEmpty = (Map.empty, Map.empty)
+removePatternFromFree HLIR.MkExprNull = (Map.empty, Map.empty)
+removePatternFromFree (HLIR.MkExprLetValueless binding inExpr) = do
+    let (freeInExpr, freeP) = removePatternFromFree inExpr
+        freeP' = Map.delete binding.name freeP
+    (   freeInExpr
+        Map.\\ Map.singleton binding.name binding.typeValue
+        , freeP'
+        )
 
 instance Free (HLIR.Pattern Identity HLIR.Type) where
     free :: HLIR.Pattern Identity HLIR.Type -> Map Text HLIR.Type
@@ -124,3 +125,6 @@ instance Free (HLIR.Pattern Identity HLIR.Type) where
     free (HLIR.MkPatternStructure fields) = free (Map.elems fields)
     free HLIR.MkPatternWildcard = Map.empty
     free (HLIR.MkPatternLocated _ p) = free p
+    free (HLIR.MkPatternReference pat _) = free pat
+
+

@@ -77,6 +77,7 @@ removeAliases (HLIR.MkTyRowExtend label fieldType opt rest) = do
   pure (HLIR.MkTyRowExtend label fieldType' opt rest')
 removeAliases (HLIR.MkTyApp base args) =
   HLIR.MkTyApp <$> removeAliases base <*> mapM removeAliases args
+removeAliases t = pure t
 
 -- | Should the unification mutate the type variables
 -- | - If True, the type variables will be mutated to point to the unified type.
@@ -125,8 +126,7 @@ applySubtypeRelation shouldMutate (argsF1 HLIR.:->: retF1) (argsF2 HLIR.:->: ret
       subRet <- applySubtypeRelation shouldMutate retF1 retF2
 
       composeSubstitutions (subsArgs ++ [subRet])
-  | otherwise =
-      M.throw (M.InvalidArgumentQuantity (length argsF1) (length argsF2))
+  | otherwise = M.throw (M.InvalidArgumentQuantity (length argsF1) (length argsF2))
 applySubtypeRelation shouldMutate t1@(HLIR.MkTyVar ref1) t2 | t1 /= t2 = do
   ty1 <- readIORef ref1
 
@@ -241,7 +241,7 @@ rewriteRow shouldMutate b (HLIR.MkTyRowExtend label fieldTy opt rowTail) newLabe
   | alpha@(HLIR.MkTyVar _) <- rowTail = do
       beta <- M.newType
       gamma <- M.newType
-
+      
       s <- applySubtypeRelation shouldMutate alpha (HLIR.MkTyRowExtend newLabel gamma (opt || b) beta)
 
       return (gamma, HLIR.MkTyRowExtend label fieldTy (opt || b) beta, s)
@@ -249,6 +249,7 @@ rewriteRow shouldMutate b (HLIR.MkTyRowExtend label fieldTy opt rowTail) newLabe
       (fieldTy', rowTail', s) <- rewriteRow shouldMutate (opt || b) rowTail newLabel
 
       return (fieldTy', HLIR.MkTyRowExtend label fieldTy (opt || b) rowTail', s)
+rewriteRow sm b (HLIR.MkTyRecord ty) label = rewriteRow sm b ty label
 rewriteRow _ _ ty label = M.throw $ M.RewriteRowError ty label
 
 composeSubstitution :: (MonadIO m) => Substitution -> Substitution -> m Substitution

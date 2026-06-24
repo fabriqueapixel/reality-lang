@@ -12,6 +12,7 @@ import Language.C.Data.Ident (Ident (Ident))
 import Language.C.System.GCC (newGCC)
 import Language.Reality.Syntax.HLIR qualified as HLIR
 import System.FilePath ((</>))
+import qualified Data.List as List
 
 {-# NOINLINE cwdGlobal #-}
 cwdGlobal :: IORef FilePath
@@ -282,8 +283,7 @@ declInfoToNode isTypedef = \case
   FunctionDecl name params ret ->
     HLIR.MkTopExternalFunction
       { HLIR.name = HLIR.MkAnnotation name [],
-        HLIR.parameters = params,
-        HLIR.returnType = ret
+        HLIR.extTypeValue = HLIR.MkTyFun (map HLIR.typeValue params) ret
       }
 
 identToText :: Ident -> Text
@@ -373,8 +373,11 @@ resolveModuleSingular
 resolveModuleSingular (HLIR.MkTopPublic node) paths = do
   resolved <- resolveModuleSingular node paths
   pure (map HLIR.MkTopPublic resolved)
-resolveModuleSingular (HLIR.MkTopExternalFunction {HLIR.name = (HLIR.MkAnnotation name generics), HLIR.parameters = params, HLIR.returnType = ret}) paths = do
+resolveModuleSingular (HLIR.MkTopExternalFunction {HLIR.name = (HLIR.MkAnnotation name generics), HLIR.extTypeValue = extType}) paths = do
   let newName = createName paths name
+
+  let (params, ret) = getArgumentsAndReturnType extType
+  let newParams = zipWith (\ty idx -> HLIR.MkAnnotation ("param" <> Text.pack (show idx)) ty) params [(1 :: Integer) ..]
 
   let body =
         HLIR.MkExprVarCall
@@ -383,23 +386,42 @@ resolveModuleSingular (HLIR.MkTopExternalFunction {HLIR.name = (HLIR.MkAnnotatio
               ( \(HLIR.MkAnnotation paramName paramType) ->
                   HLIR.MkExprVariable (HLIR.MkAnnotation paramName (Just paramType)) []
               )
-              params
+              newParams
           )
 
-  pure
-    [ HLIR.MkTopExternalFunction
-        { HLIR.name = HLIR.MkAnnotation name generics,
-          HLIR.parameters = params,
-          HLIR.returnType = ret
-        },
-      HLIR.MkTopFunctionDeclaration
-        { HLIR.name = HLIR.MkAnnotation newName generics,
-          HLIR.parameters = params,
-          HLIR.returnType = ret,
-          HLIR.body = body
-        }
-    ]
+  case newParams of
+    [] -> error "External function must have at least one parameter"
+    (firstParam : rest) -> do
+      let funType = List.foldr (\(HLIR.MkAnnotation _ ty) acc -> [ty] HLIR.:->: acc) ret rest
+          extFunType = map HLIR.typeValue newParams HLIR.:->: ret
+
+      let newBody =
+            List.foldr
+              ( \param ->
+                  HLIR.MkExprLambda [Just <$> param] Nothing
+              )
+              body
+              rest
+
+      pure
+        [ HLIR.MkTopExternalFunction
+            { HLIR.name = HLIR.MkAnnotation name generics,
+              HLIR.extTypeValue = extFunType
+            },
+          HLIR.MkTopFunctionDeclaration
+            { HLIR.name = HLIR.MkAnnotation newName generics,
+              HLIR.parameters = [firstParam],
+              HLIR.returnType = funType,
+              HLIR.body = newBody
+            }
+        ]
 resolveModuleSingular node _ = pure [node]
+
+getArgumentsAndReturnType :: HLIR.Type -> ([HLIR.Type], HLIR.Type)
+getArgumentsAndReturnType (args HLIR.:->: ret) = do
+  let (args', ret') = getArgumentsAndReturnType ret
+  (args ++ args', ret')
+getArgumentsAndReturnType ty = ([], ty)
 
 -- | Create a new name by combining the module paths with the given name.
 -- | For example, if the paths are ["MyModule", "SubModule"] and the name is "MyType",

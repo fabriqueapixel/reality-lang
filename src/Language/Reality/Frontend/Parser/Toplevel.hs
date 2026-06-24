@@ -2,7 +2,6 @@ module Language.Reality.Frontend.Parser.Toplevel where
 
 import Data.List qualified as List
 import Data.Map qualified as Map
-import Data.Set qualified as Set
 import Language.Reality.Frontend.Parser qualified as P
 import Language.Reality.Frontend.Parser.Expression qualified as P
 import Language.Reality.Frontend.Parser.Internal.Type qualified as Typ
@@ -30,18 +29,29 @@ someT :: HLIR.Type -> HLIR.Type
 someT ty =
   HLIR.MkTyApp (HLIR.MkTyId "Option") [ty]
 
-parseNamedArg :: (MonadIO m) => P.Parser m (Either (HLIR.Annotation HLIR.Type) (Text, HLIR.Type, Maybe (HLIR.HLIR "expression")))
-parseNamedArg = do
-  void $ Lex.symbol "_"
-  (_, argName) <- Lex.identifier
-  argType <- Lex.symbol ":" *> (snd <$> Typ.parseType)
+parseArg :: (MonadIO m) => P.Parser m (HLIR.Annotation HLIR.Type)
+parseArg = (snd <$>) . Lex.parens $ P.parseAnnotation' (snd <$> Typ.parseType)
 
-  argValue <- P.optional $ Lex.symbol "=" *> (snd <$> P.parseExprFull)
+parseTopExternalFunctionDeclaration ::
+  (MonadIO m) => P.Parser m (HLIR.Position, [HLIR.HLIR "toplevel"])
+parseTopExternalFunctionDeclaration = do
+  ((start, _), _) <- Lex.reserved "extern"
+  void $ Lex.reserved "fn"
 
-  pure (Right (argName, someT argType, argValue))
+  (_, idt) <- Lex.identifier
+  generics <-
+    P.option mempty $ some (P.char '\'' *> (snd <$> Lex.identifier))
+  preParams <- P.many parseArg
+  ((_, preEnd), ret) <- Lex.symbol ":" *> Typ.parseType
 
-parseArg :: (MonadIO m) => P.Parser m (Either (HLIR.Annotation HLIR.Type) (Text, HLIR.Type, Maybe (HLIR.HLIR "expression")))
-parseArg = Left <$> P.parseAnnotation' (snd <$> Typ.parseType)
+  pure
+    ( (start, preEnd),
+      [ HLIR.MkTopExternalFunction
+          { HLIR.name = HLIR.MkAnnotation idt generics,
+            HLIR.extTypeValue = List.foldr (\ann acc -> [ann.typeValue] `HLIR.MkTyFun` acc) ret preParams
+          }
+      ]
+    )
 
 -- | PARSE FUNCTION DECLARATION NODE
 -- | A function declaration node is a top-level construct that defines a
@@ -56,62 +66,85 @@ parseTopFunctionDeclaration = do
   (_, idt) <- Lex.identifier
 
   generics <-
-    P.option mempty $
-      snd <$> Lex.angles (P.sepBy1 (snd <$> Lex.identifier) Lex.comma)
+    P.option mempty $ some (P.char '\'' *> (snd <$> Lex.identifier))
 
-  (_, preParams) <-
-    Lex.parens (P.sepBy (P.try parseArg <|> parseNamedArg) Lex.comma)
+  preParams <- some parseArg
 
-  let (params, kwargs, kwargsType, otherKwargs) =
-        List.foldl
-          ( \(accArgs, accKwargs, accKwargsType, accOtherKwargs) param -> case param of
-              Left ann -> (accArgs ++ [ann], accKwargs, accKwargsType, accOtherKwargs)
-              Right (name, ty, val) ->
-                let newKwargsType = HLIR.MkTyRowExtend name ty (isJust val) accKwargsType
-                    (newKwargs, newOtherKwargs) = case val of
-                      Just v -> (Map.insert name v accKwargs, accOtherKwargs)
-                      Nothing -> (accKwargs, Set.insert name accOtherKwargs)
-                 in (accArgs, newKwargs, newKwargsType, newOtherKwargs)
-          )
-          ([], Map.empty, HLIR.MkTyRowEmpty, Set.empty)
-          preParams
+  ((_, preEnd), ret) <- Lex.symbol ":" *> Typ.parseType
 
-  (_, ret) <- Lex.symbol "->" *> Typ.parseType
+  body <- P.optional $ do
+    void $ Lex.symbol "="
 
-  ((_, end), body) <- P.parseExprBlock
+    ((_, end), body) <- P.parseExprFull
 
-  let bodyWithOther =
-        Set.foldl
-          ( \acc name ->
-              HLIR.MkExprLetIn
-                (HLIR.MkAnnotation name Nothing)
-                (HLIR.MkExprFunctionAccess "unwrap" (HLIR.MkExprStructureAccess (HLIR.MkExprVariable (HLIR.MkAnnotation "kwargs" Nothing) []) name) [] [HLIR.MkExprStructureEmpty])
-                acc
-                Nothing
-          )
-          bodyWithDefaults
-          otherKwargs
+    pure (end, body)
 
-      bodyWithDefaults =
-        Map.foldrWithKey
-          ( \name val acc ->
-              HLIR.MkExprLetIn
-                (HLIR.MkAnnotation name Nothing)
-                (HLIR.MkExprFunctionAccess "get_or_else" (HLIR.MkExprStructureAccess (HLIR.MkExprVariable (HLIR.MkAnnotation "kwargs" Nothing) []) name) [] [val, HLIR.MkExprStructureEmpty])
-                acc
-                Nothing
-          )
-          body
-          kwargs
-  let arguments = params <> [HLIR.MkAnnotation "kwargs" (HLIR.MkTyRecord kwargsType)]
+  case preParams of
+    [] -> fail "Function must have at least one parameter"
+    params@(firstParam : restParams) -> do
+
+      case body of
+        Nothing -> do
+          let newRet = List.foldr (\ann acc -> [ann.typeValue] `HLIR.MkTyFun` acc) ret params
+
+          pure
+            ( (start, preEnd),
+              [ HLIR.MkTopProperty
+                  { HLIR.header = HLIR.MkAnnotation idt generics,
+                    HLIR.propTypeValue = newRet
+                  }
+              ]
+            )
+        Just (end, bodyExpr) -> do
+          let newBody =
+                List.foldr
+                  ( \ann acc ->
+                      HLIR.MkExprLambda
+                        { HLIR.parameters = [Just <$> ann],
+                          HLIR.returnType = Nothing,
+                          HLIR.body = acc
+                        }
+                  )
+                  bodyExpr
+                  restParams
+
+          let newRet = List.foldr (\ann acc -> [ann.typeValue] `HLIR.MkTyFun` acc) ret restParams
+
+          pure
+            ( (start, end),
+              [ HLIR.MkTopFunctionDeclaration
+                  { HLIR.name = HLIR.MkAnnotation idt generics,
+                    HLIR.parameters = [firstParam],
+                    HLIR.returnType = newRet,
+                    HLIR.body = newBody
+                  }
+              ]
+            )
+
+parseTopPatternAlias ::
+  (MonadIO m) => P.Parser m (HLIR.Position, [HLIR.HLIR "toplevel"])
+parseTopPatternAlias = do
+  ((start, _), _) <- Lex.reserved "pattern"
+  (_, idt) <- Lex.identifier  
+
+  generics <-
+    P.option mempty $ some (P.char '\'' *> (snd <$> Lex.identifier))
+
+  args <- P.many parseArg
+
+  (_, retType) <- Lex.symbol ":" *> Typ.parseType
+
+  void $ Lex.symbol "="
+
+  ((_, end), pat) <- P.parsePatternFull
 
   pure
     ( (start, end),
-      [ HLIR.MkTopFunctionDeclaration
-          { HLIR.name = HLIR.MkAnnotation idt generics,
-            HLIR.parameters = arguments,
-            HLIR.returnType = ret,
-            HLIR.body = bodyWithOther
+      [ HLIR.MkTopPatternAlias
+          { HLIR.bindingWithGenerics = HLIR.MkAnnotation idt generics,
+            HLIR.arguments = args,
+            HLIR.patternBinding = pat,
+            HLIR.returnType = retType
           }
       ]
     )
@@ -131,8 +164,7 @@ parseTopTypeAlias = do
   (_, idt) <- Lex.identifier
 
   generics <-
-    P.option mempty $
-      snd <$> Lex.angles (P.sepBy1 (snd <$> Lex.identifier) Lex.comma)
+    P.option mempty $ some (P.char '\'' *> (snd <$> Lex.identifier))
 
   ((_, end), aliased) <- Lex.symbol "=" *> Typ.parseType
 
@@ -154,9 +186,17 @@ parseTopLet ::
   (MonadIO m) => P.Parser m (HLIR.Position, [HLIR.HLIR "toplevel"])
 parseTopLet = do
   ((start, _), _) <- Lex.reserved "let"
-  idt <- P.parseAnnotation (snd <$> Typ.parseType)
-  ((_, end), expr) <- Lex.symbol "=" *> P.parseExprFull
-  pure ((start, end), [HLIR.MkTopLet idt expr])
+  idt <- P.parseAnnotation' (snd <$> Typ.parseType)
+
+  end <- P.getSourcePos
+
+  optExpr <- P.optional $ do
+    void $ Lex.symbol "="
+    P.parseExprFull
+
+  pure $ case optExpr of
+    Nothing -> ((start, end), [HLIR.MkTopExternLet idt])
+    Just ((_, end'), expr) -> ((start, end'), [HLIR.MkTopLet (Just <$> idt) expr])
 
 -- | PARSE IMPORT NODE
 -- | An import node is a top-level construct that defines an import
@@ -203,105 +243,15 @@ parseTopModuleDeclaration ::
 parseTopModuleDeclaration = do
   ((start, _), _) <- Lex.reserved "mod"
   (_, idt) <- Lex.identifier
-  ((_, end), nodes) <-
-    Lex.braces (P.many (snd <$> parseTopFull <* P.optional Lex.semi))
-  pure ((start, end), [HLIR.MkTopModuleDeclaration idt (concat nodes)])
 
--- | PARSE EXTERNAL FUNCTION NODE
--- | An external function node is a top-level construct that defines an
--- | external function. External functions are defined using the `extern`
--- | keyword.
--- | External functions are similar to function declarations, but they do
--- | not have a body. They are defined as follows:
--- |
--- | - extern fn <name>[<generic>*](<param>*): <return type>
-parseTopExternalFunction ::
-  (MonadIO m) => P.Parser m (HLIR.Position, [HLIR.HLIR "toplevel"])
-parseTopExternalFunction = do
-  ((start, _), _) <- Lex.reserved "extern"
-  ((_, end), _) <- Lex.reserved "fn"
-  (_, idt) <- Lex.identifier
+  void $ Lex.symbol "="
 
-  generics <-
-    P.option mempty $
-      snd <$> Lex.angles (P.sepBy1 (snd <$> Lex.identifier) Lex.comma)
+  nodes <- Lex.indented parseTopFull
 
-  (_, preParams) <-
-    Lex.parens (P.sepBy (P.try parseArg <|> parseNamedArg) Lex.comma)
+  end <- fetchLastPosition nodes
+  let nodes' = concatMap snd nodes
 
-  let (params, _, kwargsType, _) =
-        List.foldl
-          ( \(accArgs, accKwargs, accKwargsType, accOtherKwargs) param -> case param of
-              Left ann -> (accArgs ++ [ann], accKwargs, accKwargsType, accOtherKwargs)
-              Right (name, ty, val) ->
-                let newKwargsType = HLIR.MkTyRowExtend name ty (isJust val) accKwargsType
-                    (newKwargs, newOtherKwargs) = case val of
-                      Just v -> (Map.insert name v accKwargs, accOtherKwargs)
-                      Nothing -> (accKwargs, Set.insert name accOtherKwargs)
-                 in (accArgs, newKwargs, newKwargsType, newOtherKwargs)
-          )
-          ([], Map.empty, HLIR.MkTyRowEmpty, Set.empty)
-          preParams
-
-  let finalParams = params <> [HLIR.MkAnnotation "kwargs" (HLIR.MkTyRecord kwargsType)]
-
-  (_, ret) <- Lex.symbol "->" *> Typ.parseType
-
-  pure
-    ( (start, end),
-      [ HLIR.MkTopExternalFunction
-          { HLIR.name = HLIR.MkAnnotation idt generics,
-            HLIR.parameters = finalParams,
-            HLIR.returnType = ret
-          }
-      ]
-    )
-
--- | PARSE PROPERTY NODE
--- | A property node is a top-level construct that defines a property.
--- | A property is a function that is used to get or set a value of a
--- | specific type. Properties are defined using the `property` keyword.
--- | Properties are similar to functions, but they have a different syntax
--- | and semantics.
--- | Properties are defined as follows:
--- | - property <name>[<generic>*](<param>*): <return type>
-parseTopProperty ::
-  (MonadIO m) => P.Parser m (HLIR.Position, [HLIR.HLIR "toplevel"])
-parseTopProperty = do
-  ((start, _), _) <- Lex.reserved "property"
-  (_, idt) <- Lex.identifier
-  generics <-
-    P.option mempty $
-      snd <$> Lex.angles (P.sepBy1 (snd <$> Lex.identifier) Lex.comma)
-
-  (_, preParams) <-
-    Lex.parens (P.sepBy (P.try parseArg <|> parseNamedArg) Lex.comma)
-
-  let (params, _, kwargsType) =
-        List.foldl
-          ( \(accArgs, accKwargs, accKwargsType) param -> case param of
-              Left ann -> (accArgs ++ [ann], accKwargs, accKwargsType)
-              Right (name, ty, val) ->
-                let newKwargsType = HLIR.MkTyRowExtend name ty True accKwargsType
-                    newKwargs = case val of
-                      Just v -> Map.insert name v accKwargs
-                      Nothing -> accKwargs
-                 in (accArgs, newKwargs, newKwargsType)
-          )
-          ([], Map.empty, HLIR.MkTyRowEmpty)
-          preParams
-
-  ((_, end), ret) <- Lex.symbol "->" *> Typ.parseType
-
-  pure
-    ( (start, end),
-      [ HLIR.MkTopProperty
-          { HLIR.header = HLIR.MkAnnotation idt generics,
-            HLIR.parameters = params <> [HLIR.MkAnnotation "kwargs" (HLIR.MkTyRecord kwargsType)],
-            HLIR.returnType = ret
-          }
-      ]
-    )
+  pure ((start, end), [HLIR.MkTopModuleDeclaration idt nodes'])
 
 -- | PARSE TOPLEVEL ENUMERATION
 -- | An enumeration node is a top-level construct that defines an
@@ -319,12 +269,13 @@ parseTopEnumeration ::
 parseTopEnumeration = do
   ((start, _), _) <- Lex.reserved "enum"
   (_, idt) <- Lex.identifier
-  generics <-
-    P.option mempty $
-      snd <$> Lex.angles (P.sepBy1 (snd <$> Lex.identifier) Lex.comma)
+  generics <- P.option mempty $ some (P.char '\'' *> (snd <$> Lex.identifier))
 
-  ((_, end), variants) <-
-    Lex.braces $ P.sepBy parseVariant Lex.comma
+  void $ Lex.symbol "="
+
+  variants <- Lex.indented parseVariant
+
+  end <- P.getSourcePos
 
   pure
     ( (start, end),
@@ -338,26 +289,14 @@ parseTopEnumeration = do
     parseVariant = do
       (_, name) <- Lex.identifier
       associated <-
-        P.optional $ do
-          args <- snd <$> Lex.parens (P.sepBy (P.try parseArg <|> parseNamedArg) Lex.comma)
+        P.optional $ P.some parseArg
 
-          let (params, _, kwargsType) =
-                List.foldl
-                  ( \(accArgs, accKwargs, accKwargsType) param -> case param of
-                      Left ann -> (accArgs ++ [ann.typeValue], accKwargs, accKwargsType)
-                      Right (name', ty, val) ->
-                        let newKwargsType = HLIR.MkTyRowExtend name' ty True accKwargsType
-                            newKwargs = case val of
-                              Just v -> Map.insert name' v accKwargs
-                              Nothing -> accKwargs
-                         in (accArgs, newKwargs, newKwargsType)
-                  )
-                  ([], Map.empty, HLIR.MkTyRowEmpty)
-                  args
+      pure (name, fmap (map (.typeValue)) associated)
 
-          pure (params <> [HLIR.MkTyRecord kwargsType])
-
-      pure (name, associated)
+fetchLastPosition :: [(HLIR.Position, a)] -> P.Parser m P.SourcePos
+fetchLastPosition [] = P.getSourcePos
+fetchLastPosition [((_, pos), _)] = pure pos
+fetchLastPosition (_ : xs) = fetchLastPosition xs
 
 -- | PARSE IMPLEMENTATION NODE
 -- | An implementation node is a top-level construct that defines an
@@ -370,8 +309,7 @@ parseTopEnumeration = do
 parseTopImplementation ::
   (MonadIO m) => P.Parser m (HLIR.Position, [HLIR.HLIR "toplevel"])
 parseTopImplementation = do
-  ((start, _), _) <- Lex.reserved "impl"
-  void $ Lex.reserved "fn"
+  ((start, _), _) <- Lex.reserved "overload"
 
   (_, forType) <- Lex.parens $ do
     (_, idt) <- Lex.identifier
@@ -379,68 +317,71 @@ parseTopImplementation = do
     ty <- snd <$> Typ.parseType
     pure (HLIR.MkAnnotation idt ty)
 
-  (_, idt) <- Lex.identifier
-  generics <-
-    P.option mempty $
-      snd <$> Lex.angles (P.sepBy1 (snd <$> Lex.identifier) Lex.comma)
+  void $ Lex.symbol "="
 
-  (_, preParams) <-
-    Lex.parens (P.sepBy (P.try parseArg <|> parseNamedArg) Lex.comma)
+  nodes <- Lex.indented $ do
+    ((start', _), _) <- Lex.reserved "fn"
+    (_, idt) <- Lex.identifier
 
-  let (params, kwargs, kwargsType, otherKwargs) =
-        List.foldl
-          ( \(accArgs, accKwargs, accKwargsType, accOtherKwargs) param -> case param of
-              Left ann -> (accArgs ++ [ann], accKwargs, accKwargsType, accOtherKwargs)
-              Right (name, ty, val) ->
-                let newKwargsType = HLIR.MkTyRowExtend name ty (isJust val) accKwargsType
-                    (newKwargs, newOtherKwargs) = case val of
-                      Just v -> (Map.insert name v accKwargs, accOtherKwargs)
-                      Nothing -> (accKwargs, Set.insert name accOtherKwargs)
-                 in (accArgs, newKwargs, newKwargsType, newOtherKwargs)
-          )
-          ([], Map.empty, HLIR.MkTyRowEmpty, Set.empty)
-          preParams
+    generics <- P.option mempty $
+      P.some (P.char '\'' *> (snd <$> Lex.identifier))
 
-  void $ Lex.symbol "->"
-  returnType <- snd <$> Typ.parseType
+    preParams <- P.many parseArg
 
-  ((_, end), body) <- P.parseExprBlock
+    ((_, preEnd), returnType) <- Lex.symbol ":" *> Typ.parseType
 
-  let bodyWithOther =
-        Set.foldl
-          ( \acc name ->
-              HLIR.MkExprLetIn
-                (HLIR.MkAnnotation name Nothing)
-                (HLIR.MkExprFunctionAccess "unwrap" (HLIR.MkExprStructureAccess (HLIR.MkExprVariable (HLIR.MkAnnotation "kwargs" Nothing) []) name) [] [HLIR.MkExprStructureEmpty])
-                acc
-                Nothing
-          )
-          bodyWithDefaults
-          otherKwargs
+    body <- P.optional $ do
+      void $ Lex.symbol "="
+      ((_, end), body) <- P.parseExprFull
 
-      bodyWithDefaults =
-        Map.foldrWithKey
-          ( \name val acc ->
-              HLIR.MkExprLetIn
-                (HLIR.MkAnnotation name Nothing)
-                (HLIR.MkExprFunctionAccess "get_or_else" (HLIR.MkExprStructureAccess (HLIR.MkExprVariable (HLIR.MkAnnotation "kwargs" Nothing) []) name) [] [val, HLIR.MkExprStructureEmpty])
-                acc
-                Nothing
-          )
-          body
-          kwargs
+      pure (end, body)
 
-  pure
-    ( (start, end),
-      [ HLIR.MkTopImplementation
-          { HLIR.forType = forType,
-            HLIR.header = HLIR.MkAnnotation idt generics,
-            HLIR.parameters = params <> [HLIR.MkAnnotation "kwargs" (HLIR.MkTyRecord kwargsType)],
-            HLIR.returnType = returnType,
-            HLIR.body = bodyWithOther
-          }
-      ]
-    )
+    pure (start', idt, generics, preParams, preEnd, returnType, body)
+
+  let fetchLastPosition' ::
+        MonadIO m =>
+        [(a, b, c, d, P.SourcePos, e, Maybe (P.SourcePos, f))] ->
+        P.Parser m P.SourcePos
+      fetchLastPosition' [] = P.getSourcePos
+      fetchLastPosition' [(_, _, _, _, pos, _, mPos)] = case mPos of
+        Nothing -> pure pos
+        Just (endPos, _) -> pure endPos
+      fetchLastPosition' (_ : xs) = fetchLastPosition' xs
+
+  end <- fetchLastPosition' nodes
+
+  pure ((start, end), flip map nodes $ \(start', idt, generics, preParams, preEnd, returnType, body) ->
+    case body of
+      Nothing -> do
+        let newRet = List.foldr (\ann acc -> [ann.typeValue] `HLIR.MkTyFun` acc) returnType (forType : preParams)
+
+        flip HLIR.locate (start', preEnd) $ HLIR.MkTopProperty {
+          header = HLIR.MkAnnotation idt generics,
+          propTypeValue = newRet
+        }
+
+      Just (end', bodyExpr) -> do
+
+        let newBody =
+              List.foldr
+                ( \ann acc ->
+                    HLIR.MkExprLambda
+                      { HLIR.parameters = [Just <$> ann],
+                        HLIR.returnType = Nothing,
+                        HLIR.body = acc
+                      }
+                )
+                bodyExpr
+                preParams
+
+        let newRet = List.foldr (\ann acc -> [ann.typeValue] `HLIR.MkTyFun` acc) returnType preParams
+
+        flip HLIR.locate (start', end') $ HLIR.MkTopFunctionDeclaration
+          { HLIR.name = HLIR.MkAnnotation idt generics,
+            HLIR.parameters = [forType],
+            HLIR.returnType = newRet,
+            HLIR.body = newBody
+          })
 
 -- | PARSE ANNOTATION NODE
 -- | An annotation node is a top-level construct that defines an annotation.
@@ -451,39 +392,18 @@ parseTopImplementation = do
 parseTopAnnotation ::
   (MonadIO m) => P.Parser m (HLIR.Position, [HLIR.HLIR "toplevel"])
 parseTopAnnotation = do
-  ((start, _), _) <- Lex.symbol "#"
-  void $ Lex.symbol "["
+  ((start, _), _) <- Lex.reserved "pragma"
 
-  args <-
-    P.option mempty $
-      P.sepBy (snd <$> P.parseExprFull) Lex.comma
+  args <- P.some . P.try $ P.parseExprTerm False
 
-  void $ Lex.symbol "]"
+  void $ Lex.symbol "="
 
-  ((_, end), nodes) <-
-    P.choice
-      [ Lex.braces (concat <$> P.many (snd <$> parseTopFull <* P.optional Lex.semi)),
-        parseTopFull
-      ]
+  nodes <- Lex.indented parseTopFull
 
-  pure ((start, end), HLIR.MkTopAnnotation args <$> nodes)
+  let nodes' = concatMap snd nodes
+  end <- fetchLastPosition nodes
 
--- | PARSE EXTERN LET
--- | An extern let node is a top-level construct that defines an external
--- | variable. External variables are defined using the `extern let` keyword.
--- | External variables are similar to global variables, but they are defined
--- | outside of the current module. They are defined as follows:
--- | - extern let <name>: <type>
-parseTopExternLet ::
-  (MonadIO m) => P.Parser m (HLIR.Position, [HLIR.HLIR "toplevel"])
-parseTopExternLet = do
-  ((start, _), _) <- Lex.reserved "extern"
-  void $ Lex.reserved "let"
-  (_, idt) <- Lex.identifier
-  void Lex.colon
-  ((_, end), ty) <- Typ.parseType
-
-  pure ((start, end), [HLIR.MkTopExternLet (HLIR.MkAnnotation idt ty)])
+  pure ((start, end), HLIR.MkTopAnnotation (map snd args) <$> nodes')
 
 -- | TOP LEVEL PARSING
 -- | A top-level parser is a parser that parses top-level constructs in a
@@ -508,14 +428,13 @@ parseTopFull =
     <$> P.choice
       [ parseTopConstantDeclaration,
         parseTopLet,
+        parseTopPatternAlias,
+        parseTopExternalFunctionDeclaration,
         parseTopFunctionDeclaration,
         parseTopTypeAlias,
         parseTopImport,
         parseTopPublic,
         parseTopModuleDeclaration,
-        P.try parseTopExternalFunction,
-        parseTopExternLet,
-        parseTopProperty,
         parseTopImplementation,
         parseTopAnnotation,
         parseTopEnumeration
@@ -525,4 +444,4 @@ parseTopFull =
 -- | A Reality source file is a sequence of top-level constructs.
 -- | The parser will return a list of top-level nodes.
 parseProgram :: (MonadIO m) => P.Parser m [HLIR.HLIR "toplevel"]
-parseProgram = concat <$> P.many (snd <$> parseTopFull <* P.optional Lex.semi) <* P.eof
+parseProgram = concat . concat <$> P.many (Lex.nonIndented $ snd <$> parseTopFull) <* Lex.scn <* P.eof

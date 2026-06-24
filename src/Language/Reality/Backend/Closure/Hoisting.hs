@@ -152,19 +152,17 @@ hoistLambdasInExpr (HLIR.MkExprReturn e) = do
     pure (HLIR.MkExprReturn newE, hoistedE)
 hoistLambdasInExpr HLIR.MkExprBreak = pure (HLIR.MkExprBreak, [])
 hoistLambdasInExpr HLIR.MkExprContinue = pure (HLIR.MkExprContinue, [])
-hoistLambdasInExpr (HLIR.MkExprFunctionAccess ann this tys exprs) = do
-    (newThis, hoistedThis) <- hoistLambdasInExpr this
-    (newExprs, hoistedExprs) <- mapAndUnzipM hoistLambdasInExpr exprs
-    pure
-        ( HLIR.MkExprFunctionAccess ann newThis tys newExprs
-        , hoistedThis ++ concat hoistedExprs
-        )
 hoistLambdasInExpr (HLIR.MkExprLetPatternIn pat value inExpr ret) = do
     (newValue, hoistedValue) <- hoistLambdasInExpr value
     (newInExpr, hoistedInExpr) <- hoistLambdasInExpr inExpr
     pure
         (HLIR.MkExprLetPatternIn pat newValue newInExpr ret, hoistedValue ++ hoistedInExpr)
 hoistLambdasInExpr HLIR.MkExprStructureEmpty = pure (HLIR.MkExprStructureEmpty, [])
+hoistLambdasInExpr HLIR.MkExprNull = pure (HLIR.MkExprNull, [])
+hoistLambdasInExpr (HLIR.MkExprLetValueless binding inExpr) = do
+    (newInExpr, hoistedInExpr) <- hoistLambdasInExpr inExpr
+    pure
+        (HLIR.MkExprLetValueless binding newInExpr, hoistedInExpr)
 
 {-# NOINLINE symbolCounter #-}
 symbolCounter :: IORef Int
