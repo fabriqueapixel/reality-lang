@@ -94,6 +94,7 @@ library
     mtl,
     parser-combinators,
     relude,
+    language-c
 
   mixins:
     base hiding (Prelude),
